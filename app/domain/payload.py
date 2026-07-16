@@ -19,9 +19,15 @@ O timestamp da origem, quando reconhecido, e normalizado em "_ts" (ISO-8601).
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app.domain.schemas import fields_for
+
+# Fuso dos dispositivos TITAN/THOR: o relogio da maquina publica em horario
+# local do Brasil (UTC-3). Gravamos o _ts com este offset para que ele seja
+# AWARE — sem isso o timestamp fica naive e sua conversao para epoch dependeria
+# do fuso do servidor que o consome.
+_DEVICE_TZ = timezone(timedelta(hours=-3))
 
 # Timestamp TITAN: "04/07/2026 - 14:34:46", "04/07/2026 - 14:09" (sem segundos),
 # ou com hora SEM zero a esquerda "05/07/2026 - 1:43:52" / "08/07/2026 - 0:02:44".
@@ -33,6 +39,10 @@ _TS_RE = re.compile(
 # Par "chave": valor  do quase-JSON (valor vai ate a proxima virgula ou "}").
 _KV_RE = re.compile(r'"([^"]+)"\s*:\s*([^,}]+)')
 
+# Decimal pt-BR: digitos, UMA virgula, digitos (ex: "27,4", "120,0"). Sinal
+# opcional. NAO casa "1,234,5" (milhar) nem "Producao, Geral" (texto).
+_DECIMAL_COMMA_RE = re.compile(r"^[+-]?\d+,\d+$")
+
 
 def _parse_ts(value: str) -> str | None:
     """Converte o timestamp TITAN em ISO-8601, ou None se nao casar."""
@@ -42,7 +52,9 @@ def _parse_ts(value: str) -> str | None:
     d, mo, y, hh, mm, ss = m.groups()
     ss = ss or "00"
     try:
-        return datetime(int(y), int(mo), int(d), int(hh), int(mm), int(ss)).isoformat()
+        return datetime(
+            int(y), int(mo), int(d), int(hh), int(mm), int(ss), tzinfo=_DEVICE_TZ
+        ).isoformat()
     except ValueError:
         return None
 
@@ -65,6 +77,15 @@ def _coerce(value: str):
         return float(v)
     except ValueError:
         pass
+    # float com virgula decimal pt-BR (ex: "27,4", "12,5"). Os dispositivos
+    # TITAN/THOR publicam decimais com virgula; sem isto o valor seria gravado
+    # como texto e o painel nao plotaria. So trata UMA virgula entre digitos —
+    # nao interpreta separador de milhar nem toca em texto com virgula.
+    if _DECIMAL_COMMA_RE.match(v):
+        try:
+            return float(v.replace(",", "."))
+        except ValueError:
+            pass
     return v  # texto (ex: "Producao Geral", timestamp)
 
 
