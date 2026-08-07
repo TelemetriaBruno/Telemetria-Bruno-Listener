@@ -60,8 +60,24 @@ def main() -> None:
 
     notifier = None
     if settings.stream_notify_url:
-        notifier = StreamNotifier(settings.stream_notify_url)
+        notifier = StreamNotifier(
+            settings.stream_notify_url, secret=settings.stream_notify_secret
+        )
         print(f"[PUSH] Empurrando telemetria ao painel via {settings.stream_notify_url}/api/internal/notify")
+        if not settings.stream_notify_secret:
+            print(
+                "[PUSH] AVISO: STREAM_NOTIFY_SECRET vazio. O backend vai recusar o "
+                "push (401/503) e o painel ficara so com o poll HTTP."
+            )
+        elif settings.stream_notify_url.startswith("http://") and not (
+            "127.0.0.1" in settings.stream_notify_url
+            or "localhost" in settings.stream_notify_url
+        ):
+            # o segredo autentica, nao cifra: sobre http remoto ele viaja em claro
+            print(
+                "[PUSH] AVISO: STREAM_NOTIFY_URL remoto sem TLS. O segredo vai em "
+                "claro na rede; use https:// para o backend remoto."
+            )
 
     MqttSubscriber(settings, ingest, notifier).run_forever()
 

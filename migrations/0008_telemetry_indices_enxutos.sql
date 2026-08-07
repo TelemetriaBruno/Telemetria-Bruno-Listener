@@ -1,0 +1,112 @@
+-- ============================================================================
+-- Migration 0007: enxuga os indices da tabela `telemetry`.
+--
+-- Motivo: custo de armazenamento. Medicao sobre 14.012 mensagens reais da THOR
+-- BF0304 (janela de 15,6 h) deu 21.491 msg/dia por maquina, ~7,8 milhoes/ano.
+-- Nessa volumetria cada indice superfluo custa GB por maquina por ano, e a
+-- `telemetry` acumulou 9 indices vindos de dois lugares diferentes:
+--   - 0001_initial_schema.sql (6 indices)
+--   - 0007_telemetry_indices_historico.sql (3 indices, criados depois para o
+--     Historico/TimeMachine, ja cobrindo os filtros compostos)
+--
+-- Esta migration remove 3 deles. Nenhuma consulta do backend ou do Listener
+-- deixa de ser atendida — ver a justificativa de cada DROP abaixo.
+--
+-- NAO altera colunas, dados nem o vinculo maquina<->cliente: esse vinculo vive
+-- em machines.tenant_id e nas colunas machine_id/tenant_id de cada leitura,
+-- todas preservadas.
+--
+-- Reversivel: os CREATE INDEX equivalentes estao no rodape.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 1. GIN sobre o payload — o maior ganho isolado.
+--
+-- Indice GIN sobre JSONB costuma custar o tamanho da propria tabela. Foi criado
+-- em 0001 de forma preventiva, mas NENHUMA consulta filtra por dentro do
+-- payload: o backend busca sempre por machine_id, received_at, id e category
+-- (colunas reais), e o Listener so ESCREVE o payload.
+--
+-- O unico uso de `payload ->>` no repositorio e o backfill da migration 0004
+-- (alarmes), que roda uma vez e faz varredura completa da tabela — um GIN nao
+-- seria usado ali de qualquer forma.
+-- ---------------------------------------------------------------------------
+DROP INDEX IF EXISTS idx_telemetry_payload;
+
+-- ---------------------------------------------------------------------------
+-- 2. idx_telemetry_machine (machine_id)
+--
+-- Prefixo exato de telemetry_machine_received_idx (machine_id, received_at) e
+-- de telemetry_machine_id_idx (machine_id, id). O Postgres usa o composto para
+-- qualquer consulta que filtre so por machine_id, entao este e peso morto.
+-- ---------------------------------------------------------------------------
+DROP INDEX IF EXISTS idx_telemetry_machine;
+
+-- ---------------------------------------------------------------------------
+-- 3. idx_telemetry_category (category)
+--
+-- Isolado, tem seletividade baixissima: sao ~10 data_types distribuidos por
+-- milhoes de linhas, e 2 deles (Dados1 Maquina e Dados1 Motor Diesel)
+-- concentram 97,7% do volume. O planejador prefere a varredura a usar um indice
+-- que casa metade da tabela.
+--
+-- As consultas que realmente filtram por category vem sempre acompanhadas de
+-- machine_id, e sao atendidas por telemetry_machine_category_received_idx.
+-- ---------------------------------------------------------------------------
+DROP INDEX IF EXISTS idx_telemetry_category;
+
+-- ---------------------------------------------------------------------------
+-- MANTIDOS de proposito:
+--
+--   idx_telemetry_received_at (received_at DESC)
+--     `list` ordena por received_at.desc quando NAO ha filtro de maquina
+--     (ver backend/app/infrastructure/supabase.py). Sem ele essa consulta
+--     estoura o statement timeout.
+--
+--   idx_telemetry_tenant (tenant_id)
+--     Recortes por cliente sem maquina definida (Operacao/Visao do Cliente) e
+--     as policies de RLS. Nenhum indice composto comeca por tenant_id.
+--
+--   idx_telemetry_machine_time (machine_id, received_at DESC)
+--   telemetry_machine_received_idx (machine_id, received_at)
+--     REDUNDANTES ENTRE SI (a direcao do sort nao impede o uso). Nao removo
+--     aqui porque o segundo veio de fora do fluxo de migrations e pode nao
+--     existir em todos os ambientes; derrubar o errado deixaria o Historico sem
+--     indice. Consolidar em um so depois de conferir com a query do rodape.
+--
+--   telemetry_machine_category_received_idx, telemetry_machine_id_idx
+--     Atendem o seletor de "Dado" e a paginacao por cursor do TimeMachine.
+-- ---------------------------------------------------------------------------
+
+-- Atualiza as estatisticas para o planejador reavaliar os planos sem os
+-- indices removidos.
+ANALYZE public.telemetry;
+
+-- ---------------------------------------------------------------------------
+-- CONFERENCIA (rodar antes e depois; nao faz parte da migration)
+--
+--   SELECT indexrelname,
+--          pg_size_pretty(pg_relation_size(indexrelid)) AS tamanho,
+--          idx_scan AS usos
+--     FROM pg_stat_user_indexes
+--    WHERE relname = 'telemetry'
+--    ORDER BY pg_relation_size(indexrelid) DESC;
+--
+-- idx_scan = 0 num indice com trafego real e a confirmacao de que ele nao
+-- serve a ninguem. Use essa saida tambem para decidir qual dos dois indices
+-- (machine_id, received_at) manter.
+--
+-- Tamanho total da tabela com e sem indices:
+--   SELECT pg_size_pretty(pg_total_relation_size('telemetry')) AS com_indices,
+--          pg_size_pretty(pg_relation_size('telemetry'))       AS so_dados;
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- ROLLBACK
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_telemetry_payload
+--       ON telemetry USING GIN (payload);
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_telemetry_machine
+--       ON telemetry (machine_id);
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_telemetry_category
+--       ON telemetry (category);
+-- ---------------------------------------------------------------------------

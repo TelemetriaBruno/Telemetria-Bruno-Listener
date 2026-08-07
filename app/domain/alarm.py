@@ -5,7 +5,8 @@ Cada mensagem dessa category carrega, quando ha alarme, um codigo e/ou uma
 descricao; payload so com a hora (sem esses campos) significa "sem alarme".
 Aqui extraimos a ativacao (ou None) de um payload ja decodificado.
 
-Espelha a leitura do backend (telemetria-backend, _alarm_of) — manter em sincronia.
+Este e o UNICO ponto que decide o que e ativacao: o que sai daqui vai para a
+tabela `alarms`, e o backend le essa tabela em vez de reinterpretar o payload.
 """
 
 from dataclasses import dataclass

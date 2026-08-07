@@ -37,6 +37,11 @@ class Settings:
     # Push em tempo real: URL do telemetria-backend que repassa aos paineis via
     # WebSocket. Vazio desliga o empurrao (painel volta a depender so do poll).
     stream_notify_url: str
+    # Segredo compartilhado com o backend, enviado no header X-Stream-Secret.
+    # Precisa ser IGUAL ao STREAM_NOTIFY_SECRET de la, senao o backend recusa o
+    # push com 401. Com backend em outra maquina, use https:// na URL acima: o
+    # segredo autentica mas nao cifra, e sobre http ele vai em claro.
+    stream_notify_secret: str
 
     @staticmethod
     def from_env() -> "Settings":
@@ -61,4 +66,5 @@ class Settings:
             save_json_files=os.getenv("SAVE_JSON_FILES", "false").lower() == "true",
             output_dir=os.getenv("OUTPUT_DIR", "data"),
             stream_notify_url=os.getenv("STREAM_NOTIFY_URL", "http://127.0.0.1:8800").strip().rstrip("/"),
+            stream_notify_secret=os.getenv("STREAM_NOTIFY_SECRET", "").strip(),
         )
