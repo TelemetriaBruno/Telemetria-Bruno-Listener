@@ -1,0 +1,30 @@
+services:
+  - type: worker
+    name: telemetria-bruno-listener
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: MQTT_HOST
+        sync: false
+      - key: MQTT_PORT
+        sync: false
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      - key: MQTT_TOPICS
+        sync: false
+      - key: MQTT_CLIENT_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: STREAM_NOTIFY_URL
+        sync: false
+      - key: STREAM_NOTIFY_SECRET
+        sync: false
