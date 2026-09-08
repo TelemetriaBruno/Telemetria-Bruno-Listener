@@ -37,6 +37,10 @@ class Settings:
     # Push em tempo real: URL do telemetria-backend que repassa aos paineis via
     # WebSocket. Vazio desliga o empurrao (painel volta a depender so do poll).
     stream_notify_url: str
+    # Porta HTTP exigida por plataformas de hospedagem (Render define $PORT).
+    # 0 desliga o servidor de saude, que e o caso do uso local.
+    http_port: int
+
     # Segredo compartilhado com o backend, enviado no header X-Stream-Secret.
     # Precisa ser IGUAL ao STREAM_NOTIFY_SECRET de la, senao o backend recusa o
     # push com 401. Com backend em outra maquina, use https:// na URL acima: o
@@ -66,5 +70,6 @@ class Settings:
             save_json_files=os.getenv("SAVE_JSON_FILES", "false").lower() == "true",
             output_dir=os.getenv("OUTPUT_DIR", "data"),
             stream_notify_url=os.getenv("STREAM_NOTIFY_URL", "http://127.0.0.1:8800").strip().rstrip("/"),
+            http_port=int(os.getenv("PORT", "0")),
             stream_notify_secret=os.getenv("STREAM_NOTIFY_SECRET", "").strip(),
         )

@@ -11,6 +11,7 @@ Uso:
 
 from app.application.ingest_telemetry import IngestTelemetry
 from app.infrastructure.config import Settings
+from app.infrastructure.health_server import start_health_server
 from app.infrastructure.json_file_writer import JsonFileWriter
 from app.infrastructure.machine_cache import CachedMachineRepository
 from app.infrastructure.mqtt_subscriber import MqttSubscriber
@@ -26,6 +27,11 @@ from app.infrastructure.supabase import (
 
 def main() -> None:
     settings = Settings.from_env()
+
+    # Hosts como o Render matam o processo se nada escutar em $PORT. Sem a
+    # variavel (uso local), nenhuma porta e aberta.
+    if settings.http_port:
+        start_health_server(settings.http_port)
 
     if not settings.mqtt_username or not settings.mqtt_password:
         print("[AVISO] MQTT_USERNAME/MQTT_PASSWORD nao definidos no .env.")
