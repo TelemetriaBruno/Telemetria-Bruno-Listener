@@ -17,12 +17,14 @@ from typing import Callable
 
 from app.application.ports import (
     AlarmRepository,
+    MachinePositionRepository,
     MachineRepository,
     TelemetryFallbackWriter,
     TelemetryRepository,
 )
 from app.domain.alarm import ALARM_CATEGORY, alarm_from_payload
 from app.domain.entities import TelemetryEvent
+from app.domain.geo import LOCATION_CATEGORY, position_from_payload
 from app.domain.payload import decode_payload
 from app.domain.topic import parse_topic
 
@@ -49,12 +51,14 @@ class IngestTelemetry:
         fallback: TelemetryFallbackWriter | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         alarms: AlarmRepository | None = None,
+        positions: MachinePositionRepository | None = None,
     ):
         self._machines = machines
         self._telemetry = telemetry
         self._fallback = fallback
         self._clock = clock
         self._alarms = alarms
+        self._positions = positions
 
     def execute(self, topic: str, payload: bytes, qos: int, retain: bool) -> IngestResult:
         parsed = parse_topic(topic)
@@ -86,16 +90,41 @@ class IngestTelemetry:
 
         # Alarme: se esta linha e uma ATIVACAO, grava tambem na tabela dedicada
         # `alarms`. Best-effort e isolado — falha aqui nao afeta a telemetria.
+        #
+        # O try e o que torna "best-effort" verdadeiro: os repositorios devolvem
+        # False no caminho previsto, mas uma excecao inesperada (rede caindo no
+        # meio, JSON invalido na resposta) subiria por aqui e mataria a mensagem
+        # JA gravada, e a telemetria seria perdida por causa do registro auxiliar.
         if self._alarms is not None and event.category == ALARM_CATEGORY:
-            alarm = alarm_from_payload(event.payload, event.received_at)
-            if alarm is not None:
-                self._alarms.save(
-                    tenant_id=event.tenant_id,
-                    machine_id=event.machine_id,
-                    code=alarm.code,
-                    description=alarm.description,
-                    activated_at=alarm.activated_at,
-                )
+            try:
+                alarm = alarm_from_payload(event.payload, event.received_at)
+                if alarm is not None:
+                    self._alarms.save(
+                        tenant_id=event.tenant_id,
+                        machine_id=event.machine_id,
+                        code=alarm.code,
+                        description=alarm.description,
+                        activated_at=alarm.activated_at,
+                    )
+            except Exception as exc:
+                print(f"[ALARME] Falha ao registrar ativacao (ignorado): {exc}")
+
+        # Localizacao: alem da linha na telemetry, atualiza a ULTIMA posicao
+        # conhecida no cadastro da maquina. E o que mantem a maquina no mapa
+        # depois de desligada, quando ela para de publicar coordenada.
+        # Best-effort e isolado, como o alarme.
+        if self._positions is not None and event.category == LOCATION_CATEGORY:
+            try:
+                pos = position_from_payload(event.payload, event.received_at)
+                if pos is not None:
+                    self._positions.update_position(
+                        machine_id=event.machine_id,
+                        lat=pos.lat,
+                        lon=pos.lon,
+                        measured_at=pos.measured_at,
+                    )
+            except Exception as exc:
+                print(f"[POSICAO] Falha ao gravar posicao (ignorado): {exc}")
 
         status = IngestStatus.SAVED if saved else IngestStatus.SAVE_FAILED
         return IngestResult(status, event=event, machine_code=parsed.machine_code)

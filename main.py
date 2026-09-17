@@ -19,6 +19,7 @@ from app.infrastructure.null_telemetry import NullTelemetryRepository
 from app.infrastructure.stream_notifier import StreamNotifier
 from app.infrastructure.supabase import (
     SupabaseAlarmRepository,
+    SupabaseMachinePositionRepository,
     SupabaseMachineRepository,
     SupabaseTelemetryRepository,
     build_http_session,
@@ -60,8 +61,16 @@ def main() -> None:
     # Alarmes vao para a tabela dedicada `alarms` (so no modo banco).
     alarms = None if file_mode else SupabaseAlarmRepository(settings, http)
 
+    # Ultima posicao conhecida no cadastro da maquina (so no modo banco): e o
+    # que mantem a maquina no mapa depois de desligada.
+    positions = None if file_mode else SupabaseMachinePositionRepository(settings, http)
+
     ingest = IngestTelemetry(
-        machines=machines, telemetry=telemetry, fallback=fallback, alarms=alarms
+        machines=machines,
+        telemetry=telemetry,
+        fallback=fallback,
+        alarms=alarms,
+        positions=positions,
     )
 
     notifier = None

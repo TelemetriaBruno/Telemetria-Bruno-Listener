@@ -32,6 +32,19 @@ class TelemetryFallbackWriter(Protocol):
         ...
 
 
+class MachinePositionRepository(Protocol):
+    def update_position(
+        self,
+        machine_id: str,
+        lat: float,
+        lon: float,
+        measured_at,
+    ) -> bool:
+        """Grava a ULTIMA posicao conhecida no cadastro da maquina. Retorna True
+        se gravou. Best-effort: falha aqui NAO deve derrubar a ingestao normal."""
+        ...
+
+
 class AlarmRepository(Protocol):
     def save(
         self,

@@ -189,3 +189,73 @@ class SupabaseAlarmRepository:
                 print(f"[REST] Erro de rede no insert de alarme (tentativa {attempt}): {exc}")
             time.sleep(1.0 * attempt)
         return False
+
+
+class SupabaseMachinePositionRepository:
+    """Grava a ultima posicao conhecida em machines.metadata.
+
+    Vai em `metadata` (JSONB que ja existe no esquema) e nao em colunas novas:
+    a posicao e um atributo do cadastro, nao uma dimensao consultavel, e o
+    backend ja devolve metadata inteiro em MachineOut, e com isso o painel
+    recebe a coordenada sem uma linha de mudanca no backend.
+
+    O merge e feito no cliente (le metadata, funde a chave, grava de volta)
+    porque o PostgREST nao aplica patch parcial dentro de um JSONB. A corrida
+    aqui e inofensiva: duas posicoes da mesma maquina a 15 min de distancia
+    nao competem, e o pior caso e reescrever a chave com o valor mais novo.
+
+    Best-effort: problemas aqui nao devem impedir a gravacao da telemetria.
+    """
+
+    def __init__(self, settings: Settings, http: requests.Session):
+        self._rest_base = f"{settings.supabase_url}/rest/v1" if settings.supabase_url else None
+        self._timeout = settings.http_timeout
+        self._http = http
+
+    def update_position(
+        self,
+        machine_id: str,
+        lat: float,
+        lon: float,
+        measured_at,
+    ) -> bool:
+        if not self._rest_base:
+            return False
+
+        try:
+            resp = self._http.get(
+                f"{self._rest_base}/machines",
+                params={"id": f"eq.{machine_id}", "select": "metadata", "limit": "1"},
+                timeout=self._timeout,
+            )
+            if resp.status_code != 200:
+                print(f"[REST] Falha ao ler metadata da maquina: HTTP {resp.status_code}")
+                return False
+            rows = resp.json()
+        except requests.RequestException as exc:
+            print(f"[REST] Erro de rede lendo metadata: {exc}")
+            return False
+
+        metadata = (rows[0].get("metadata") if rows else None) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["position"] = {
+            "lat": lat,
+            "lon": lon,
+            "at": measured_at.isoformat(),
+        }
+
+        try:
+            resp = self._http.patch(
+                f"{self._rest_base}/machines",
+                params={"id": f"eq.{machine_id}"},
+                json={"metadata": metadata},
+                headers={"Prefer": "return=minimal"},
+                timeout=self._timeout,
+            )
+            if resp.status_code in (200, 204):
+                return True
+            print(f"[REST] update posicao HTTP {resp.status_code}: {resp.text[:200]}")
+        except requests.RequestException as exc:
+            print(f"[REST] Erro de rede gravando posicao: {exc}")
+        return False
