@@ -16,8 +16,8 @@ def build_http_session(settings: Settings) -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
-            "apikey": settings.supabase_key or "",
-            "Authorization": f"Bearer {settings.supabase_key}" if settings.supabase_key else "",
+            "apikey": settings.rest_key or "",
+            "Authorization": f"Bearer {settings.rest_key}" if settings.rest_key else "",
             "Content-Type": "application/json",
         }
     )
@@ -26,14 +26,14 @@ def build_http_session(settings: Settings) -> requests.Session:
 
 class SupabaseMachineRepository:
     def __init__(self, settings: Settings, http: requests.Session):
-        self._rest_base = f"{settings.supabase_url}/rest/v1" if settings.supabase_url else None
-        self._configured = bool(self._rest_base and settings.supabase_key)
+        self._rest_base = settings.rest_url
+        self._configured = bool(self._rest_base and settings.rest_key)
         self._timeout = settings.http_timeout
         self._http = http
 
     def find_by_code(self, machine_code: str) -> Machine | None:
         if not self._configured:
-            print("[REST] SUPABASE_URL/SUPABASE_KEY nao configurados no .env")
+            print("[REST] POSTGREST_URL/POSTGREST_KEY ou SUPABASE_URL/SUPABASE_KEY nao configurados no .env")
             return None
 
         try:
@@ -109,7 +109,7 @@ class SupabaseMachineRepository:
 
 class SupabaseTelemetryRepository:
     def __init__(self, settings: Settings, http: requests.Session):
-        self._rest_base = f"{settings.supabase_url}/rest/v1" if settings.supabase_url else None
+        self._rest_base = settings.rest_url
         self._timeout = settings.http_timeout
         self._http = http
 
@@ -149,7 +149,7 @@ class SupabaseAlarmRepository:
     problemas aqui nao devem impedir a gravacao normal da telemetria."""
 
     def __init__(self, settings: Settings, http: requests.Session):
-        self._rest_base = f"{settings.supabase_url}/rest/v1" if settings.supabase_url else None
+        self._rest_base = settings.rest_url
         self._timeout = settings.http_timeout
         self._http = http
 
@@ -208,7 +208,7 @@ class SupabaseMachinePositionRepository:
     """
 
     def __init__(self, settings: Settings, http: requests.Session):
-        self._rest_base = f"{settings.supabase_url}/rest/v1" if settings.supabase_url else None
+        self._rest_base = settings.rest_url
         self._timeout = settings.http_timeout
         self._http = http
 

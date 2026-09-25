@@ -25,6 +25,10 @@ class Settings:
     supabase_key: str | None
     http_timeout: float
 
+    # PostgREST próprio (EC2 na frente do RDS). Vazios = o do Supabase.
+    postgrest_url: str
+    postgrest_key: str | None
+
     # Cache de maquinas (segundos ate revalidar)
     machine_cache_ttl: float
 
@@ -47,6 +51,16 @@ class Settings:
     # segredo autentica mas nao cifra, e sobre http ele vai em claro.
     stream_notify_secret: str
 
+    @property
+    def rest_url(self) -> str | None:
+        if self.postgrest_url:
+            return self.postgrest_url
+        return f"{self.supabase_url}/rest/v1" if self.supabase_url else None
+
+    @property
+    def rest_key(self) -> str | None:
+        return self.postgrest_key or self.supabase_key
+
     @staticmethod
     def from_env() -> "Settings":
         load_dotenv()
@@ -65,6 +79,8 @@ class Settings:
             supabase_url=os.getenv("SUPABASE_URL", "").rstrip("/"),
             supabase_key=os.getenv("SUPABASE_KEY"),
             http_timeout=float(os.getenv("HTTP_TIMEOUT", "10")),
+            postgrest_url=os.getenv("POSTGREST_URL", "").strip().rstrip("/"),
+            postgrest_key=os.getenv("POSTGREST_KEY") or None,
             machine_cache_ttl=float(os.getenv("MACHINE_CACHE_TTL", "300")),
             telemetry_sink=os.getenv("TELEMETRY_SINK", "supabase").strip().lower(),
             save_json_files=os.getenv("SAVE_JSON_FILES", "false").lower() == "true",

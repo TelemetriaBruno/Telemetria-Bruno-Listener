@@ -36,8 +36,8 @@ def main() -> None:
 
     if not settings.mqtt_username or not settings.mqtt_password:
         print("[AVISO] MQTT_USERNAME/MQTT_PASSWORD nao definidos no .env.")
-    if not settings.supabase_url or not settings.supabase_key:
-        print("[AVISO] SUPABASE_URL/SUPABASE_KEY nao definidos no .env.")
+    if not settings.rest_url or not settings.rest_key:
+        print("[AVISO] banco sem endereco: defina POSTGREST_URL/POSTGREST_KEY ou SUPABASE_URL/SUPABASE_KEY no .env.")
 
     http = build_http_session(settings)
 
