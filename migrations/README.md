@@ -65,7 +65,12 @@ As migrações de índice trazem a consulta que checa `indisvalid` no rodapé.
 | 0009 | coluna `locked` em login_attempts |
 | 0010 | índices de `category` p/ o painel ao vivo |
 | 0011 | **RPC `history_series`** — agregação no banco. **PENDENTE de aplicar** |
+| 0015 | coluna `camera_path` em machines (câmera ao vivo). **PENDENTE de aplicar** |
 
 A 0011 é a única ainda não aplicada. Enquanto ela não rodar, o backend detecta a
 ausência da função e cai no caminho de varredura em Python, que produz o mesmo
 resultado a um custo bem maior — o deploy do código não depende dela.
+
+A 0015 também pode rodar a qualquer momento: sem a coluna, o backend lê toda
+máquina como "sem câmera" e só o cadastro da câmera responde 503 pedindo a
+migration.
