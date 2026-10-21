@@ -24,7 +24,7 @@ from app.application.ports import (
 )
 from app.domain.alarm import ALARM_CATEGORY, alarm_from_payload
 from app.domain.entities import TelemetryEvent
-from app.domain.geo import LOCATION_CATEGORY, position_from_payload
+from app.domain.geo import position_from_payload
 from app.domain.payload import decode_payload
 from app.domain.topic import parse_topic
 
@@ -113,7 +113,12 @@ class IngestTelemetry:
         # conhecida no cadastro da maquina. E o que mantem a maquina no mapa
         # depois de desligada, quando ela para de publicar coordenada.
         # Best-effort e isolado, como o alarme.
-        if self._positions is not None and event.category == LOCATION_CATEGORY:
+        #
+        # Vale para QUALQUER category com latitude e longitude, nao so para
+        # "Localizacao": ha firmware que manda a posicao junto com os
+        # horimetros. position_from_payload exige o par completo e valido, entao
+        # as outras categorias dao None e nao chegam ao banco.
+        if self._positions is not None:
             try:
                 pos = position_from_payload(event.payload, event.received_at)
                 if pos is not None:

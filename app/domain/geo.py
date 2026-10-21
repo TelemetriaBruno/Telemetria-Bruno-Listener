@@ -1,5 +1,9 @@
 """
-Regra de dominio: uma linha 'Localizacao' carrega uma posicao utilizavel?
+Regra de dominio: uma linha de telemetria carrega uma posicao utilizavel?
+
+Qualquer category pode trazer a posicao: alem de 'Localizacao', ha firmware
+que a manda junto com os horimetros. O que decide e o payload ter latitude e
+longitude validas, nao o nome do topico.
 
 Espelha frontend/src/domain/geo.ts, manter em sincronia.
 
@@ -15,9 +19,6 @@ consulta na telemetry, nao: ela cairia fora de qualquer janela.
 
 from dataclasses import dataclass
 from datetime import datetime
-
-# category que carrega a posicao
-LOCATION_CATEGORY = "Localizacao"
 
 # O contrato do fabricante nao fixa a grafia; os firmwares variam entre
 # acentuado, abreviado e ingles.
