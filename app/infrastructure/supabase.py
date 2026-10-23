@@ -196,6 +196,32 @@ class SupabaseAlarmRepository:
             time.sleep(1.0 * attempt)
         return False
 
+    def fired_since(self, machine_id: str, category: str, code, description, since) -> bool:
+        if not self._rest_base:
+            return False
+        params = {
+            "select": "id",
+            "machine_id": f"eq.{machine_id}",
+            "category": f"eq.{category}",
+            "activated_at": f"gte.{since.isoformat()}",
+            "limit": "1",
+        }
+        # mesma identidade do alarme que o painel usa (alarmKey): o codigo, e a
+        # descricao so quando nao ha codigo
+        if code is not None:
+            params["code"] = f"eq.{code}"
+        else:
+            params["code"] = "is.null"
+            params["description"] = f"eq.{description}"
+        try:
+            resp = self._http.get(f"{self._rest_base}/alarms", params=params, timeout=self._timeout)
+            if resp.status_code == 200:
+                return len(resp.json()) > 0
+            print(f"[REST] consulta de alarme recente HTTP {resp.status_code}: {resp.text[:200]}")
+        except (requests.RequestException, ValueError) as exc:
+            print(f"[REST] Erro ao consultar alarme recente (grava assim mesmo): {exc}")
+        return False
+
     def clear(self, machine_id: str, category: str, cleared_at) -> bool:
         if not self._rest_base:
             return False

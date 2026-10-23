@@ -22,7 +22,7 @@ from app.application.ports import (
     TelemetryFallbackWriter,
     TelemetryRepository,
 )
-from app.domain.alarm import alarm_from_payload, is_alarm_category, is_all_clear, message_time
+from app.domain.alarm import REPEAT_WINDOW, alarm_from_payload, is_alarm_category, is_all_clear, message_time
 from app.domain.entities import TelemetryEvent
 from app.domain.geo import position_from_payload
 from app.domain.payload import decode_payload
@@ -106,7 +106,15 @@ class IngestTelemetry:
                     )
                 else:
                     alarm = alarm_from_payload(event.payload, event.received_at)
-                    if alarm is not None:
+                    # o mesmo alarme de novo dentro da janela e a maquina
+                    # repetindo a mensagem, nao um acionamento (REPEAT_WINDOW)
+                    if alarm is not None and not self._alarms.fired_since(
+                        machine_id=event.machine_id,
+                        category=event.category,
+                        code=alarm.code,
+                        description=alarm.description,
+                        since=alarm.activated_at - REPEAT_WINDOW,
+                    ):
                         self._alarms.save(
                             tenant_id=event.tenant_id,
                             machine_id=event.machine_id,

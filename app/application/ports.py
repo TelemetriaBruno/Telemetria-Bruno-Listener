@@ -57,8 +57,22 @@ class AlarmRepository(Protocol):
         category: str | None = None,
     ) -> bool:
         """Persiste uma ativacao de alarme na tabela dedicada. Retorna True se
-        gravou, ou se o mesmo alarme ja estava aberto (nao e um disparo novo).
+        gravou, ou se esta mesma mensagem ja estava gravada (reentrega).
         Best-effort: falha aqui NAO deve derrubar a ingestao normal."""
+        ...
+
+    def fired_since(
+        self,
+        machine_id: str,
+        category: str,
+        code: str | None,
+        description: str | None,
+        since,
+    ) -> bool:
+        """True se o mesmo alarme (pelo codigo; sem codigo, pela descricao) ja
+        tem disparo gravado nesta maquina e topico a partir de `since`. Na
+        duvida (falha de rede) responde False: gravar uma repeticao e melhor
+        que perder um alarme."""
         ...
 
     def clear(self, machine_id: str, category: str, cleared_at) -> bool:

@@ -23,7 +23,7 @@ tabela `alarms`, e o backend le essa tabela em vez de reinterpretar o payload.
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # categories cujas linhas sao (ou nao) ativacoes de alarme: "Alarmes",
 # "Alarmes Ativos", "Alarmes Motor Diesel"... Por padrao de nome, como o painel
@@ -37,6 +37,11 @@ _COMBINED_FIELD = "A-"
 # hifens proprios ("Aviso no Motor Diesel - Verifique a Tela..."), por isso o
 # corte e so no primeiro
 _COMBINED_RE = re.compile(r"^([A-Za-z]*\d+)\s*-\s*(.*)$")
+# O firmware costuma mandar o mesmo alarme duas vezes seguidas: 2 a 5 s de
+# intervalo, as vezes ate ~30 s (medido na TITAN BF0167, 21-23/10/2026). Um
+# acionamento de verdade (apertar a emergencia de novo) vem minutos depois.
+# Dentro desta janela o mesmo alarme e REPETICAO e nao vira disparo novo.
+REPEAT_WINDOW = timedelta(seconds=60)
 # "Maquina sem alarmes", com ou sem acento e em qualquer caixa; o firmware
 # escreve em cp1252, entao "Máquina" tambem pode chegar
 _ALL_CLEAR_RE = re.compile(r"\bsem alarmes?\b")
