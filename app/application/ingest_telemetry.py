@@ -22,7 +22,7 @@ from app.application.ports import (
     TelemetryFallbackWriter,
     TelemetryRepository,
 )
-from app.domain.alarm import alarm_from_payload, is_alarm_category
+from app.domain.alarm import alarm_from_payload, is_alarm_category, is_all_clear, message_time
 from app.domain.entities import TelemetryEvent
 from app.domain.geo import position_from_payload
 from app.domain.payload import decode_payload
@@ -89,7 +89,8 @@ class IngestTelemetry:
             self._fallback.write(event)
 
         # Alarme: se esta linha e uma ATIVACAO, grava tambem na tabela dedicada
-        # `alarms`. Best-effort e isolado — falha aqui nao afeta a telemetria.
+        # `alarms`; se e o "Maquina sem alarmes", fecha os alarmes abertos do
+        # topico. Best-effort e isolado — falha aqui nao afeta a telemetria.
         #
         # O try e o que torna "best-effort" verdadeiro: os repositorios devolvem
         # False no caminho previsto, mas uma excecao inesperada (rede caindo no
@@ -97,15 +98,23 @@ class IngestTelemetry:
         # JA gravada, e a telemetria seria perdida por causa do registro auxiliar.
         if self._alarms is not None and is_alarm_category(event.category):
             try:
-                alarm = alarm_from_payload(event.payload, event.received_at)
-                if alarm is not None:
-                    self._alarms.save(
-                        tenant_id=event.tenant_id,
+                if is_all_clear(event.payload):
+                    self._alarms.clear(
                         machine_id=event.machine_id,
-                        code=alarm.code,
-                        description=alarm.description,
-                        activated_at=alarm.activated_at,
+                        category=event.category,
+                        cleared_at=message_time(event.payload, event.received_at),
                     )
+                else:
+                    alarm = alarm_from_payload(event.payload, event.received_at)
+                    if alarm is not None:
+                        self._alarms.save(
+                            tenant_id=event.tenant_id,
+                            machine_id=event.machine_id,
+                            code=alarm.code,
+                            description=alarm.description,
+                            activated_at=alarm.activated_at,
+                            category=event.category,
+                        )
             except Exception as exc:
                 print(f"[ALARME] Falha ao registrar ativacao (ignorado): {exc}")
 

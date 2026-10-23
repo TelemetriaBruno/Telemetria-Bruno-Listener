@@ -13,6 +13,8 @@ Para cada linha das categories de alarme, a ferramenta:
   2. insere a ativacao em `alarms` (source_id = id da linha), pulando o que ja
      existe (pelo source_id ou por maquina + instante + codigo + descricao, que
      e o que o Listener grava sem source_id). Pode ser rodada de novo sem duplicar.
+  3. no "Maquina sem alarmes", fecha os alarmes abertos daquele topico, como o
+     Listener faz ao vivo (as linhas vem em ordem de id, a de chegada).
 
 Uso (na pasta do Listener, com o mesmo .env do servico):
     python -m tools.reprocessar_alarmes             # so mostra o que faria
@@ -22,7 +24,7 @@ Uso (na pasta do Listener, com o mesmo .env do servico):
 import argparse
 from datetime import datetime, timezone
 
-from app.domain.alarm import alarm_from_payload
+from app.domain.alarm import alarm_from_payload, is_all_clear, message_time
 from app.domain.payload import decode_payload
 from app.infrastructure.config import Settings
 from app.infrastructure.supabase import SupabaseAlarmRepository, build_http_session
@@ -93,6 +95,12 @@ def main() -> None:
                                 print(f"  [ERRO] telemetry {row['id']}: HTTP {resp.status_code} {resp.text[:200]}")
                                 fail += 1
 
+                if is_all_clear(payload):
+                    when = message_time(payload, _utc(row["received_at"]))
+                    print(f"  = {when:%d/%m %H:%M:%S}  sem alarmes")
+                    if args.aplicar and not alarms.clear(row["machine_id"], category, when):
+                        fail += 1
+                    continue
                 alarm = alarm_from_payload(payload, _utc(row["received_at"]))
                 if alarm is None:
                     continue
@@ -106,6 +114,7 @@ def main() -> None:
                 if args.aplicar and not alarms.save(
                     tenant_id=row["tenant_id"], machine_id=row["machine_id"], code=alarm.code,
                     description=alarm.description, activated_at=alarm.activated_at, source_id=row["id"],
+                    category=category,
                 ):
                     fail += 1
         print(f"=== {category}: {n} linhas | payload redecodificado: {fixed} | "

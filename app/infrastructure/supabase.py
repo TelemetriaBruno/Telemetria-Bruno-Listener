@@ -161,6 +161,7 @@ class SupabaseAlarmRepository:
         description: str | None,
         activated_at,
         source_id: int | None = None,
+        category: str | None = None,
     ) -> bool:
         if not self._rest_base:
             return False
@@ -171,6 +172,7 @@ class SupabaseAlarmRepository:
             "description": description,
             "activated_at": activated_at.isoformat(),
             "source_id": source_id,
+            "category": category,
         }
         for attempt in (1, 2):
             try:
@@ -182,11 +184,46 @@ class SupabaseAlarmRepository:
                 )
                 if resp.status_code in (200, 201, 204):
                     return True
+                # o mesmo alarme ainda aberto (UNIQUE parcial da migration 0018):
+                # a maquina repetiu o aviso, nao e um disparo novo
+                if resp.status_code == 409:
+                    return True
                 print(f"[REST] insert alarm HTTP {resp.status_code}: {resp.text[:200]}")
                 if 400 <= resp.status_code < 500:
                     return False
             except requests.RequestException as exc:
                 print(f"[REST] Erro de rede no insert de alarme (tentativa {attempt}): {exc}")
+            time.sleep(1.0 * attempt)
+        return False
+
+    def clear(self, machine_id: str, category: str, cleared_at) -> bool:
+        if not self._rest_base:
+            return False
+        when = cleared_at.isoformat()
+        params = {
+            "machine_id": f"eq.{machine_id}",
+            "cleared_at": "is.null",
+            # alarme que disparou DEPOIS do aviso (mensagens fora de ordem) segue
+            # aberto: o "sem alarmes" nao fala dele
+            "activated_at": f"lte.{when}",
+            "or": f'(category.eq."{category}",category.is.null)',
+        }
+        for attempt in (1, 2):
+            try:
+                resp = self._http.patch(
+                    f"{self._rest_base}/alarms",
+                    params=params,
+                    json={"cleared_at": when},
+                    headers={"Prefer": "return=minimal"},
+                    timeout=self._timeout,
+                )
+                if resp.status_code in (200, 204):
+                    return True
+                print(f"[REST] resolve alarm HTTP {resp.status_code}: {resp.text[:200]}")
+                if 400 <= resp.status_code < 500:
+                    return False
+            except requests.RequestException as exc:
+                print(f"[REST] Erro de rede ao resolver alarmes (tentativa {attempt}): {exc}")
             time.sleep(1.0 * attempt)
         return False
 

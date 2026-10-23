@@ -54,7 +54,15 @@ class AlarmRepository(Protocol):
         description: str | None,
         activated_at,
         source_id: int | None = None,
+        category: str | None = None,
     ) -> bool:
         """Persiste uma ativacao de alarme na tabela dedicada. Retorna True se
-        gravou. Best-effort: falha aqui NAO deve derrubar a ingestao normal."""
+        gravou, ou se o mesmo alarme ja estava aberto (nao e um disparo novo).
+        Best-effort: falha aqui NAO deve derrubar a ingestao normal."""
+        ...
+
+    def clear(self, machine_id: str, category: str, cleared_at) -> bool:
+        """Fecha os alarmes ABERTOS da maquina naquele topico (e os sem topico,
+        de antes da coluna existir) que dispararam ate `cleared_at`: e o
+        "Maquina sem alarmes". Retorna True se a gravacao foi aceita."""
         ...
