@@ -184,8 +184,8 @@ class SupabaseAlarmRepository:
                 )
                 if resp.status_code in (200, 201, 204):
                     return True
-                # o mesmo alarme ainda aberto (UNIQUE parcial da migration 0018):
-                # a maquina repetiu o aviso, nao e um disparo novo
+                # a mesma mensagem gravada de novo (UNIQUE da migration 0020:
+                # maquina + topico + alarme + hora): reentrega, ja esta na tabela
                 if resp.status_code == 409:
                     return True
                 print(f"[REST] insert alarm HTTP {resp.status_code}: {resp.text[:200]}")

@@ -19,6 +19,9 @@ Para cada linha das categories de alarme, a ferramenta:
 Uso (na pasta do Listener, com o mesmo .env do servico):
     python -m tools.reprocessar_alarmes             # so mostra o que faria
     python -m tools.reprocessar_alarmes --aplicar   # grava
+    python -m tools.reprocessar_alarmes --desde 2026-10-23T09:10:00-03:00
+        # so as mensagens que chegaram a partir dai (ex.: recuperar os disparos
+        # que a regra da 0018 recusou, sem trazer de volta o que foi apagado)
 """
 
 import argparse
@@ -50,6 +53,8 @@ def _get(http, base, table, params, timeout):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--aplicar", action="store_true", help="grava (sem isto, so simula)")
+    ap.add_argument("--desde", type=datetime.fromisoformat, default=None,
+                    help="so mensagens recebidas a partir deste instante ISO-8601 (com fuso)")
     ap.add_argument("categories", nargs="*", default=CATEGORIES)
     args = ap.parse_args()
 
@@ -67,15 +72,22 @@ def main() -> None:
     by_content = {_key(a["machine_id"], _utc(a["activated_at"]), a["code"], a["description"]) for a in existing}
     print(f"alarms hoje: {len(existing)} linhas")
     print("MODO:", "APLICANDO" if args.aplicar else "SIMULACAO (use --aplicar para gravar)")
+    if args.desde is not None:
+        if args.desde.tzinfo is None:
+            raise SystemExit("--desde precisa de fuso (ex.: 2026-10-23T09:10:00-03:00)")
+        print(f"DESDE: {args.desde.isoformat()}")
 
     for category in args.categories:
         n = fixed = new = dup = fail = 0
         cursor = 0
         while True:
-            rows = _get(http, base, "telemetry", {
+            params = {
                 "select": "id,tenant_id,machine_id,received_at,payload",
                 "category": f"eq.{category}", "id": f"gt.{cursor}",
-                "order": "id.asc", "limit": str(PAGE)}, timeout)
+                "order": "id.asc", "limit": str(PAGE)}
+            if args.desde is not None:
+                params["received_at"] = f"gte.{args.desde.isoformat()}"
+            rows = _get(http, base, "telemetry", params, timeout)
             if not rows:
                 break
             cursor = rows[-1]["id"]
