@@ -56,7 +56,14 @@ def main() -> None:
         telemetry = SupabaseTelemetryRepository(settings, http)
         fallback = JsonFileWriter(settings.output_dir) if settings.save_json_files else None
         onoff = "com" if fallback else "sem"
-        print(f"[MODO] Telemetria no Supabase ({onoff} copia local .jsonl)")
+        # o destino real e o rest_url: POSTGREST_URL (RDS) quando definido, senao
+        # o Supabase. So a URL vai para o log; a chave fica de fora.
+        destino = (
+            f"PostgREST proprio (RDS) em {settings.postgrest_url}"
+            if settings.postgrest_url
+            else f"Supabase em {settings.supabase_url or '(SUPABASE_URL vazio)'}"
+        )
+        print(f"[MODO] Telemetria no banco via {destino} ({onoff} copia local .jsonl)")
 
     # Alarmes vao para a tabela dedicada `alarms` (so no modo banco).
     alarms = None if file_mode else SupabaseAlarmRepository(settings, http)
