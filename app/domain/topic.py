@@ -27,7 +27,7 @@ def parse_topic(topic: str) -> ParsedTopic | None:
     os dispositivos as vezes publicam com carriage return
     (ex: 'THOR - Serie BF0304\\r/Dados1 Motor Diesel'). No machine_code isso
     criaria uma maquina fantasma; no data_type quebraria toda comparacao exata
-    de category, e a mais sensivel e a de ALARM_CATEGORY, que decide se a linha
+    de category, e a mais sensivel e a de is_alarm_category, que decide se a linha
     vai para a tabela `alarms` (um \\r invisivel faria o alarme nao ser gravado).
     """
     m = _TOPIC_RE.match(topic)

@@ -156,12 +156,20 @@ def _decode_csv(text: str, data_type: str | None) -> dict:
 def decode_payload(raw: bytes, data_type: str | None = None) -> dict:
     """
     Interpreta o payload TITAN. Sempre inclui "_raw" (texto original).
-    Retorna binario em {"raw_hex": ...} se nao for texto decodificavel.
+    Aceita UTF-8 e, na falta dele, Windows-1252. Retorna binario em
+    {"raw_hex": ...} se nao for texto decodificavel em nenhum dos dois.
     """
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return {"raw_hex": raw.hex(), "encoding": "binary"}
+        # Os CLPs TITAN/THOR mandam o texto em Windows-1252 quando ha acento:
+        # "Comunicação" chega com 0xE7 0xE3, que nao e UTF-8 valido. Sem esta
+        # segunda tentativa, todo alarme com acento virava raw_hex ilegivel
+        # (132 de 180 em out/2026). So cai em binario o que nem cp1252 aceita.
+        try:
+            text = raw.decode("cp1252")
+        except UnicodeDecodeError:
+            return {"raw_hex": raw.hex(), "encoding": "binary"}
 
     text = text.strip()
 

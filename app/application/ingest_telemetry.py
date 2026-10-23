@@ -22,7 +22,7 @@ from app.application.ports import (
     TelemetryFallbackWriter,
     TelemetryRepository,
 )
-from app.domain.alarm import ALARM_CATEGORY, alarm_from_payload
+from app.domain.alarm import alarm_from_payload, is_alarm_category
 from app.domain.entities import TelemetryEvent
 from app.domain.geo import position_from_payload
 from app.domain.payload import decode_payload
@@ -95,7 +95,7 @@ class IngestTelemetry:
         # False no caminho previsto, mas uma excecao inesperada (rede caindo no
         # meio, JSON invalido na resposta) subiria por aqui e mataria a mensagem
         # JA gravada, e a telemetria seria perdida por causa do registro auxiliar.
-        if self._alarms is not None and event.category == ALARM_CATEGORY:
+        if self._alarms is not None and is_alarm_category(event.category):
             try:
                 alarm = alarm_from_payload(event.payload, event.received_at)
                 if alarm is not None:
