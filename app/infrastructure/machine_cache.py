@@ -12,6 +12,10 @@ from app.application.ports import MachineRepository
 from app.domain.entities import Machine
 
 
+# Com o banco fora, quanto esperar para tentar renovar o cadastro de novo.
+STALE_RETRY_S = 30.0
+
+
 class CachedMachineRepository:
     def __init__(self, inner: MachineRepository, ttl_seconds: float):
         self._inner = inner
@@ -46,4 +50,15 @@ class CachedMachineRepository:
         # tentar de novo na proxima mensagem.
         if machine is not None:
             self._cache[machine_code] = {"machine": machine, "ts": now}
-        return machine
+            return machine
+        # Falhou a renovacao de uma maquina que ja conheciamos (banco lento ou
+        # fora): segue com o cadastro antigo em vez de perder a leitura, e so
+        # tenta renovar de novo daqui a STALE_RETRY_S. Sem esse prazo, cada
+        # mensagem esperaria o timeout do banco e travaria o envio ao painel.
+        if cached is not None and cached["machine"] is not None:
+            self._cache[machine_code] = {
+                "machine": cached["machine"],
+                "ts": now - self._ttl + STALE_RETRY_S,
+            }
+            return cached["machine"]
+        return None

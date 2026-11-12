@@ -9,9 +9,12 @@ Uso:
     python main.py
 """
 
+import signal
+
 from app.application.ingest_telemetry import IngestTelemetry
 from app.infrastructure.config import Settings
 from app.infrastructure.health_server import start_health_server
+from app.infrastructure.ingest_pipeline import IngestPipeline
 from app.infrastructure.json_file_writer import JsonFileWriter
 from app.infrastructure.machine_cache import CachedMachineRepository
 from app.infrastructure.mqtt_subscriber import MqttSubscriber
@@ -41,8 +44,10 @@ def main() -> None:
 
     http = build_http_session(settings)
 
+    # Sessao HTTP propria: o cadastro e consultado pela thread que prepara as
+    # leituras, e a gravacao usa a outra sessao em outra thread.
     machines = CachedMachineRepository(
-        SupabaseMachineRepository(settings, http),
+        SupabaseMachineRepository(settings, build_http_session(settings)),
         ttl_seconds=settings.machine_cache_ttl,
     )
 
@@ -101,7 +106,23 @@ def main() -> None:
                 "claro na rede; use https:// para o backend remoto."
             )
 
-    MqttSubscriber(settings, ingest, notifier).run_forever()
+    # Reserva para quando a fila de gravacao estourar (banco fora por horas).
+    overflow = JsonFileWriter(settings.output_dir)
+    pipeline = IngestPipeline(ingest, notifier=notifier, overflow=overflow)
+    pipeline.start()
+    subscriber = MqttSubscriber(settings, pipeline)
+
+    # systemd para o servico com SIGTERM: desconecta do broker e grava o que
+    # ainda esta na fila antes de sair, em vez de perder as leituras pendentes.
+    signal.signal(signal.SIGTERM, lambda signum, frame: subscriber.stop())
+
+    subscriber.run_forever()
+    pendentes = pipeline.pendentes
+    em_dia = pipeline.stop(timeout=20.0)
+    print(
+        f"[FIM] Listener encerrado. Fila ao parar: {pendentes} leitura(s); "
+        + ("todas gravadas." if em_dia else "nem todas couberam no prazo.")
+    )
 
 
 if __name__ == "__main__":

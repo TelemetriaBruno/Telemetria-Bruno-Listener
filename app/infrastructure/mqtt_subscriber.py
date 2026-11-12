@@ -1,30 +1,24 @@
 """
 Adaptador de entrada MQTT (paho): conecta no EMQX via TLS, assina os topicos
-e entrega cada mensagem ao caso de uso IngestTelemetry.
+e entrega cada mensagem a esteira de ingestao (IngestPipeline).
 
-E o unico lugar que conhece paho-mqtt; o caso de uso recebe dados crus.
+E o unico lugar que conhece paho-mqtt. O callback so enfileira: gravar no banco
+aqui dentro travava a thread do paho quando o banco ficava lento, e o broker
+derrubava a conexao por keepalive (ver ingest_pipeline.py).
 """
 
 import ssl
-import sys
 
 import paho.mqtt.client as mqtt
 
-from app.application.ingest_telemetry import IngestStatus, IngestTelemetry
 from app.infrastructure.config import Settings
-from app.infrastructure.stream_notifier import StreamNotifier
+from app.infrastructure.ingest_pipeline import IngestPipeline
 
 
 class MqttSubscriber:
-    def __init__(
-        self,
-        settings: Settings,
-        ingest: IngestTelemetry,
-        notifier: StreamNotifier | None = None,
-    ):
+    def __init__(self, settings: Settings, pipeline: IngestPipeline):
         self._settings = settings
-        self._ingest = ingest
-        self._notifier = notifier
+        self._pipeline = pipeline
         self._client = self._build_client()
 
     def _build_client(self) -> mqtt.Client:
@@ -57,32 +51,14 @@ class MqttSubscriber:
         print(f"[OFF] Desconectado do MQTT (reason_code={reason_code}). Reconectando...")
 
     def _on_message(self, client, userdata, msg):
-        result = self._ingest.execute(
-            topic=msg.topic,
-            payload=msg.payload,
-            qos=msg.qos,
-            retain=bool(msg.retain),
-        )
-
-        if result.status is IngestStatus.INVALID_TOPIC:
-            print(f"[SKIP] Topico sem nivel de tipo de dado: {msg.topic}")
-        elif result.status is IngestStatus.UNKNOWN_MACHINE:
-            print(
-                f"[ERRO] Nao foi possivel resolver/registrar a maquina "
-                f"'{result.machine_code}' (repositorio indisponivel?) — topico {msg.topic}"
-            )
-        else:
-            event = result.event
-            status = "gravada" if result.status is IngestStatus.SAVED else "FALHOU"
-            dono = event.tenant_id or "SEM-CLIENTE"
-            print(f"[MSG] {result.machine_code}/{event.category} (tenant={dono}) {status}")
-            # Empurra para o painel no mesmo instante (best-effort, nao bloqueia).
-            if self._notifier is not None and result.status is IngestStatus.SAVED:
-                self._notifier.notify(event)
+        # So enfileira (com a hora da chegada) e volta: o paho precisa ficar
+        # livre para responder ao broker e receber as proximas mensagens.
+        self._pipeline.submit(msg.topic, msg.payload, msg.qos, bool(msg.retain))
 
     # --- Ciclo de vida --------------------------------------------------------
 
     def run_forever(self) -> None:
+        """Bloqueia ate stop() (ou Ctrl+C) desconectar do broker."""
         s = self._settings
         print(f"Conectando a {s.mqtt_host}:{s.mqtt_port} ...")
         self._client.connect(s.mqtt_host, s.mqtt_port, keepalive=60)
@@ -91,4 +67,6 @@ class MqttSubscriber:
         except KeyboardInterrupt:
             print("\n[FIM] Encerrando por interrupcao do usuario.")
             self._client.disconnect()
-            sys.exit(0)
+
+    def stop(self) -> None:
+        self._client.disconnect()

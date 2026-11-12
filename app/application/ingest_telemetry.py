@@ -7,6 +7,11 @@ Fluxo:
      (sem cliente) se ainda nao existir. So falha se o repositorio cair.
   3. Monta o TelemetryEvent e persiste (via TelemetryRepository).
 
+Os passos 1-2 (prepare) e 3 (persist) sao separados porque rodam em threads
+diferentes no Listener (ver infrastructure/ingest_pipeline.py): o painel recebe
+a leitura logo depois do prepare, sem esperar o banco. `execute` faz os dois em
+sequencia, para quem nao precisa da separacao.
+
 Nao conhece MQTT, HTTP nem banco: recebe dados crus e fala com portas.
 """
 
@@ -30,6 +35,7 @@ from app.domain.topic import parse_topic
 
 
 class IngestStatus(Enum):
+    PREPARED = "prepared"  # evento montado, ainda nao gravado
     SAVED = "saved"
     INVALID_TOPIC = "invalid_topic"
     UNKNOWN_MACHINE = "unknown_machine"
@@ -60,7 +66,34 @@ class IngestTelemetry:
         self._alarms = alarms
         self._positions = positions
 
-    def execute(self, topic: str, payload: bytes, qos: int, retain: bool) -> IngestResult:
+    def execute(
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int,
+        retain: bool,
+        received_at: datetime | None = None,
+    ) -> IngestResult:
+        prepared = self.prepare(topic, payload, qos, retain, received_at)
+        if prepared.status is not IngestStatus.PREPARED:
+            return prepared
+        saved = self.persist(prepared.event)
+        status = IngestStatus.SAVED if saved else IngestStatus.SAVE_FAILED
+        return IngestResult(status, event=prepared.event, machine_code=prepared.machine_code)
+
+    def prepare(
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int,
+        retain: bool,
+        received_at: datetime | None = None,
+    ) -> IngestResult:
+        """Resolve a maquina e monta o evento, sem gravar nada.
+
+        `received_at` e a hora em que a mensagem CHEGOU. Quem enfileira passa o
+        instante da chegada: se a gravacao atrasar, a leitura continua com a
+        hora certa no banco e no painel."""
         parsed = parse_topic(topic)
         if parsed is None:
             return IngestResult(IngestStatus.INVALID_TOPIC)
@@ -80,10 +113,14 @@ class IngestTelemetry:
             topic=topic,
             qos=qos,
             retain=retain,
-            received_at=self._clock(),
+            received_at=received_at or self._clock(),
             payload=decode_payload(payload, parsed.data_type),
         )
+        return IngestResult(IngestStatus.PREPARED, event=event, machine_code=parsed.machine_code)
 
+    def persist(self, event: TelemetryEvent) -> bool:
+        """Grava a leitura e os registros derivados (alarme, posicao). Devolve
+        se a telemetria foi gravada; alarme e posicao sao best-effort."""
         saved = self._telemetry.save(event)
         if self._fallback is not None:
             self._fallback.write(event)
@@ -148,5 +185,4 @@ class IngestTelemetry:
             except Exception as exc:
                 print(f"[POSICAO] Falha ao gravar posicao (ignorado): {exc}")
 
-        status = IngestStatus.SAVED if saved else IngestStatus.SAVE_FAILED
-        return IngestResult(status, event=event, machine_code=parsed.machine_code)
+        return saved
