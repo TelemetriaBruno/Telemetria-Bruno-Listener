@@ -50,6 +50,10 @@ class Settings:
     # push com 401. Com backend em outra maquina, use https:// na URL acima: o
     # segredo autentica mas nao cifra, e sobre http ele vai em claro.
     stream_notify_secret: str
+    # Estado mantido (domain/hold.py): leitura igual a anterior nao vira linha
+    # nova. HOLD_REPEATED=false volta a gravar toda leitura.
+    hold_repeated: bool = True
+    hold_flush_s: float = 10.0
 
     @property
     def rest_url(self) -> str | None:
@@ -88,4 +92,6 @@ class Settings:
             stream_notify_url=os.getenv("STREAM_NOTIFY_URL", "http://127.0.0.1:8800").strip().rstrip("/"),
             http_port=int(os.getenv("PORT", "0")),
             stream_notify_secret=os.getenv("STREAM_NOTIFY_SECRET", "").strip(),
+            hold_repeated=os.getenv("HOLD_REPEATED", "true").strip().lower() != "false",
+            hold_flush_s=float(os.getenv("HOLD_FLUSH_S", "10")),
         )

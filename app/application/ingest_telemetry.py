@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable
 
+from app.application.held_states import HeldStates
 from app.application.ports import (
     AlarmRepository,
     MachinePositionRepository,
@@ -32,6 +33,12 @@ from app.domain.entities import TelemetryEvent
 from app.domain.geo import position_from_payload
 from app.domain.payload import decode_payload
 from app.domain.topic import parse_topic
+
+
+class PersistOutcome(Enum):
+    SAVED = "gravada"      # linha nova no banco
+    HELD = "mantida"       # igual a anterior: estendeu o estado aberto, sem linha nova
+    FAILED = "FALHOU"
 
 
 class IngestStatus(Enum):
@@ -58,6 +65,7 @@ class IngestTelemetry:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         alarms: AlarmRepository | None = None,
         positions: MachinePositionRepository | None = None,
+        held: HeldStates | None = None,
     ):
         self._machines = machines
         self._telemetry = telemetry
@@ -65,6 +73,9 @@ class IngestTelemetry:
         self._clock = clock
         self._alarms = alarms
         self._positions = positions
+        # Estado mantido (ver domain/hold.py). None = grava toda leitura, como
+        # antes; e o modo do repositorio que nao sabe devolver o id da linha.
+        self._held = held
 
     def execute(
         self,
@@ -120,10 +131,33 @@ class IngestTelemetry:
 
     def persist(self, event: TelemetryEvent) -> bool:
         """Grava a leitura e os registros derivados (alarme, posicao). Devolve
-        se a telemetria foi gravada; alarme e posicao sao best-effort."""
-        saved = self._telemetry.save(event)
+        se a telemetria foi gravada (ou absorvida pelo estado mantido); alarme e
+        posicao sao best-effort."""
+        return self.persist_outcome(event) is not PersistOutcome.FAILED
+
+    def flush_held(self, final: bool = False) -> int:
+        """Atualiza no banco o "mantido ate" dos estados abertos: os parados ha
+        algum tempo, ou todos (`final`, no encerramento)."""
+        if self._held is None:
+            return 0
+        return self._held.flush_all() if final else self._held.flush_due()
+
+    def persist_outcome(self, event: TelemetryEvent) -> PersistOutcome:
         if self._fallback is not None:
             self._fallback.write(event)
+
+        # Igual a anterior do topico: o painel ja recebeu (o aviso sai antes da
+        # gravacao), e o banco so registra que o valor continuou ate agora. Nada
+        # de alarme nem de posicao: o valor e o mesmo que ja os gerou.
+        if self._held is not None and self._held.absorb(event):
+            return PersistOutcome.HELD
+
+        if self._held is not None:
+            row_id = self._telemetry.insert(event)
+            saved = row_id is not None
+            self._held.opened(event, row_id)
+        else:
+            saved = self._telemetry.save(event)
 
         # Alarme: se esta linha e uma ATIVACAO, grava tambem na tabela dedicada
         # `alarms`; se e o "Maquina sem alarmes", fecha os alarmes abertos do
@@ -185,4 +219,4 @@ class IngestTelemetry:
             except Exception as exc:
                 print(f"[POSICAO] Falha ao gravar posicao (ignorado): {exc}")
 
-        return saved
+        return PersistOutcome.SAVED if saved else PersistOutcome.FAILED

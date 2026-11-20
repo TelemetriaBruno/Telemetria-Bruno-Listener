@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from app.application.ingest_telemetry import IngestStatus, IngestTelemetry
+from app.application.ingest_telemetry import IngestStatus, IngestTelemetry, PersistOutcome
 from app.application.ports import TelemetryFallbackWriter
 from app.domain.entities import TelemetryEvent
 
@@ -46,6 +46,9 @@ AVISO_FILA = 200
 AVISO_INTERVALO_S = 30.0
 
 _FIM = object()  # sinal de encerramento que atravessa as duas filas
+# De quanto em quanto a thread de gravacao, mesmo sem leitura nova, atualiza o
+# "mantido ate" dos estados parados (maquina que parou de mandar no meio de um).
+MANUTENCAO_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -165,20 +168,46 @@ class IngestPipeline:
             self._enfileirar(self._gravacao, (result.machine_code, result.event))
 
     def _gravar(self) -> None:
+        proxima_manutencao = self._clock() + MANUTENCAO_S
         while True:
-            item = self._gravacao.get()
-            if item is _FIM:
-                return
-            code, event = item
             try:
-                saved = self._ingest.persist(event)
-            except Exception as exc:
-                self._log(f"[REST] Falha inesperada ao gravar {code}/{event.category}: {exc}")
-                saved = False
-            status = "gravada" if saved else "FALHOU"
-            dono = event.tenant_id or "SEM-CLIENTE"
-            self._log(f"[MSG] {code}/{event.category} (tenant={dono}) {status}")
-            self._avisar_atraso()
+                item = self._gravacao.get(timeout=MANUTENCAO_S)
+            except queue.Empty:
+                item = None
+            if item is _FIM:
+                # o estado aberto de cada topico vai inteiro para o banco
+                self._manter(final=True)
+                return
+            if item is not None:
+                code, event = item
+                try:
+                    status = self._persistir(event)
+                except Exception as exc:
+                    self._log(f"[REST] Falha inesperada ao gravar {code}/{event.category}: {exc}")
+                    status = PersistOutcome.FAILED.value
+                dono = event.tenant_id or "SEM-CLIENTE"
+                self._log(f"[MSG] {code}/{event.category} (tenant={dono}) {status}")
+                self._avisar_atraso()
+            if self._clock() >= proxima_manutencao:
+                proxima_manutencao = self._clock() + MANUTENCAO_S
+                self._manter(final=False)
+
+    def _persistir(self, event: TelemetryEvent) -> str:
+        """gravada / mantida / FALHOU. Ingestao sem estado mantido (ou de teste)
+        so tem `persist`."""
+        outcome = getattr(self._ingest, "persist_outcome", None)
+        if outcome is not None:
+            return outcome(event).value
+        return "gravada" if self._ingest.persist(event) else PersistOutcome.FAILED.value
+
+    def _manter(self, final: bool) -> None:
+        flush = getattr(self._ingest, "flush_held", None)
+        if flush is None:
+            return
+        try:
+            flush(final=final)
+        except Exception as exc:
+            self._log(f"[ESTADO] Falha ao atualizar os estados mantidos (ignorado): {exc}")
 
     # --- apoio -------------------------------------------------------------------
 

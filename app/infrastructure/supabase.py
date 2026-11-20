@@ -114,6 +114,14 @@ class SupabaseTelemetryRepository:
         self._http = http
 
     def save(self, event: TelemetryEvent) -> bool:
+        return self._insert(event, want_id=False) is not None
+
+    def insert(self, event: TelemetryEvent) -> int | None:
+        """Grava e devolve o id da linha (0 = gravou mas a resposta nao trouxe o
+        id; None = nao gravou). E o id que o estado mantido atualiza depois."""
+        return self._insert(event, want_id=True)
+
+    def _insert(self, event: TelemetryEvent, want_id: bool) -> int | None:
         body = {
             "tenant_id": event.tenant_id,
             "machine_id": event.machine_id,
@@ -128,19 +136,80 @@ class SupabaseTelemetryRepository:
             try:
                 resp = self._http.post(
                     f"{self._rest_base}/telemetry",
+                    params={"select": "id"} if want_id else None,
                     json=body,
-                    headers={"Prefer": "return=minimal"},
+                    headers={"Prefer": "return=representation" if want_id else "return=minimal"},
                     timeout=self._timeout,
                 )
                 if resp.status_code in (200, 201, 204):
-                    return True
+                    if not want_id:
+                        return 0
+                    try:
+                        rows = resp.json()
+                        return int(rows[0]["id"]) if rows else 0
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        return 0
                 print(f"[REST] insert telemetry HTTP {resp.status_code}: {resp.text[:300]}")
                 if 400 <= resp.status_code < 500:
-                    return False
+                    return None
             except requests.RequestException as exc:
                 print(f"[REST] Erro de rede no insert (tentativa {attempt}): {exc}")
             time.sleep(1.5 * attempt)
         print("[REST] Telemetria NAO gravada apos retries.")
+        return None
+
+    def supports_hold(self) -> bool:
+        """O banco tem as colunas do estado mantido (migration 0026)? Sem elas a
+        ingestao grava toda leitura, como antes: nada se perde por a migration
+        ainda nao ter rodado."""
+        try:
+            resp = self._http.get(
+                f"{self._rest_base}/telemetry",
+                params={"select": "id,held_until,repeats", "limit": "1"},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            print(f"[ESTADO] Nao deu para conferir as colunas do estado mantido: {exc}")
+            return False
+        if resp.status_code != 200:
+            print(f"[ESTADO] Banco sem as colunas do estado mantido (HTTP {resp.status_code}): {resp.text[:200]}")
+            return False
+        # A permissao de ATUALIZAR tambem: sem ela a linha do estado nunca
+        # ganharia o "mantido ate", e o historico mostraria buracos. Atualiza uma
+        # linha que nao existe (id -1): so a permissao e conferida.
+        try:
+            resp = self._http.patch(
+                f"{self._rest_base}/telemetry",
+                params={"id": "eq.-1"},
+                json={"repeats": 0},
+                headers={"Prefer": "return=minimal"},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            print(f"[ESTADO] Nao deu para conferir a permissao de atualizar a telemetria: {exc}")
+            return False
+        if resp.status_code in (200, 204):
+            return True
+        print(f"[ESTADO] Sem permissao para atualizar held_until/repeats (HTTP {resp.status_code}): {resp.text[:200]}")
+        return False
+
+    def extend_hold(self, row_id: int, held_until, repeats: int) -> bool:
+        """Uma tentativa so: quem chama tenta de novo no proximo ciclo, e a
+        thread de gravacao nao pode ficar presa esperando retentativas."""
+        try:
+            resp = self._http.patch(
+                f"{self._rest_base}/telemetry",
+                params={"id": f"eq.{row_id}"},
+                json={"held_until": held_until.isoformat(), "repeats": int(repeats)},
+                headers={"Prefer": "return=minimal"},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            print(f"[ESTADO] Erro de rede ao estender a linha {row_id}: {exc}")
+            return False
+        if resp.status_code in (200, 204):
+            return True
+        print(f"[ESTADO] Atualizar a linha {row_id}: HTTP {resp.status_code}: {resp.text[:200]}")
         return False
 
 

@@ -10,7 +10,9 @@ Uso:
 """
 
 import signal
+from datetime import timedelta
 
+from app.application.held_states import HeldStates
 from app.application.ingest_telemetry import IngestTelemetry
 from app.infrastructure.config import Settings
 from app.infrastructure.health_server import start_health_server
@@ -77,12 +79,26 @@ def main() -> None:
     # que mantem a maquina no mapa depois de desligada.
     positions = None if file_mode else SupabaseMachinePositionRepository(settings, http)
 
+    # Estado mantido: leitura igual a anterior do topico nao vira linha nova, so
+    # estende "mantido ate" na linha do estado (ver app/domain/hold.py). So liga
+    # se o banco ja tem as colunas (migration 0026); senao grava toda leitura.
+    held = None
+    if not file_mode and settings.hold_repeated:
+        if telemetry.supports_hold():
+            held = HeldStates(telemetry, flush_after=timedelta(seconds=settings.hold_flush_s))
+            print(f"[ESTADO] Leitura repetida nao vira linha nova (mantido ate atualizado a cada {settings.hold_flush_s:g} s)")
+        else:
+            print("[ESTADO] Gravando toda leitura: o banco ainda nao tem held_until/repeats (migration 0026)")
+    elif not file_mode:
+        print("[ESTADO] HOLD_REPEATED=false: gravando toda leitura")
+
     ingest = IngestTelemetry(
         machines=machines,
         telemetry=telemetry,
         fallback=fallback,
         alarms=alarms,
         positions=positions,
+        held=held,
     )
 
     notifier = None

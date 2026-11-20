@@ -25,6 +25,18 @@ class TelemetryRepository(Protocol):
         """Persiste o evento. Retorna True se gravou."""
         ...
 
+    # Para o estado mantido (domain/hold.py). So o repositorio do banco tem; sem
+    # eles a ingestao grava toda leitura.
+    def insert(self, event: TelemetryEvent) -> int | None:
+        """Persiste o evento e devolve o id da linha (0 = gravou sem saber o id;
+        None = nao gravou)."""
+        ...
+
+    def extend_hold(self, row_id: int, held_until, repeats: int) -> bool:
+        """Grava na linha ate quando o valor durou e quantas leituras iguais
+        vieram depois da primeira."""
+        ...
+
 
 class TelemetryFallbackWriter(Protocol):
     def write(self, event: TelemetryEvent) -> None:
