@@ -66,6 +66,7 @@ As migrações de índice trazem a consulta que checa `indisvalid` no rodapé.
 | 0010 | índices de `category` p/ o painel ao vivo |
 | 0011 | **RPC `history_series`** — agregação no banco. **PENDENTE de aplicar** |
 | 0015 | coluna `camera_path` em machines (câmera ao vivo). **PENDENTE de aplicar** |
+| 0023 | **`telemetry_rollup_hour`** — histórico pré-agregado por hora. Sem ela o backend segue agregando as leituras |
 | 0026 | **estado mantido**: `held_until`/`repeats` em telemetry (leitura igual à anterior não vira linha), rollup e `history_series` recompondo as repetidas. Aplicar ANTES do Listener novo; sem ela o Listener grava toda leitura |
 
 A 0011 é a única ainda não aplicada. Enquanto ela não rodar, o backend detecta a
