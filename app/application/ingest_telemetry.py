@@ -23,10 +23,12 @@ from typing import Callable
 from app.application.held_states import HeldStates
 from app.application.ports import (
     AlarmRepository,
+    EventLog,
     MachinePositionRepository,
     MachineRepository,
     TelemetryFallbackWriter,
     TelemetryRepository,
+    sem_log,
 )
 from app.domain.alarm import REPEAT_WINDOW, alarm_from_payload, is_alarm_category, is_all_clear, message_time
 from app.domain.entities import TelemetryEvent
@@ -66,6 +68,7 @@ class IngestTelemetry:
         alarms: AlarmRepository | None = None,
         positions: MachinePositionRepository | None = None,
         held: HeldStates | None = None,
+        log: EventLog = sem_log,
     ):
         self._machines = machines
         self._telemetry = telemetry
@@ -76,6 +79,9 @@ class IngestTelemetry:
         # Estado mantido (ver domain/hold.py). None = grava toda leitura, como
         # antes; e o modo do repositorio que nao sabe devolver o id da linha.
         self._held = held
+        # log(nivel, evt, **campos); o main.py injeta o de logfmt, limitado (a
+        # falha de alarme/posicao pode se repetir a cada mensagem)
+        self._log = log
 
     def execute(
         self,
@@ -195,7 +201,7 @@ class IngestTelemetry:
                             category=event.category,
                         )
             except Exception as exc:
-                print(f"[ALARME] Falha ao registrar ativacao (ignorado): {exc}")
+                self._log("WARN", "alarme.falha", topico=event.topic, erro=exc)
 
         # Localizacao: alem da linha na telemetry, atualiza a ULTIMA posicao
         # conhecida no cadastro da maquina. E o que mantem a maquina no mapa
@@ -217,6 +223,6 @@ class IngestTelemetry:
                         measured_at=pos.measured_at,
                     )
             except Exception as exc:
-                print(f"[POSICAO] Falha ao gravar posicao (ignorado): {exc}")
+                self._log("WARN", "posicao.falha", topico=event.topic, erro=exc)
 
         return PersistOutcome.SAVED if saved else PersistOutcome.FAILED

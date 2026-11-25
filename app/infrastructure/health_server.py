@@ -12,6 +12,8 @@ termina, sem precisar encerrar o servidor.
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from app.infrastructure.logfmt import log
+
 
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
@@ -27,4 +29,4 @@ class _HealthHandler(BaseHTTPRequestHandler):
 def start_health_server(port: int) -> None:
     server = HTTPServer(("0.0.0.0", port), _HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"[HTTP] Porta {port} aberta para o health check da plataforma.")
+    log("INFO", "http.saude_aberta", porta=port)

@@ -14,6 +14,7 @@ from app.application.ingest_telemetry import IngestStatus, IngestTelemetry
 from app.domain.entities import Machine
 from app.infrastructure.ingest_pipeline import IngestPipeline
 from app.infrastructure.machine_cache import STALE_RETRY_S, CachedMachineRepository
+from tests.captura_log import Logs
 
 MAQUINA = Machine(id="m-1", machine_code="TITAN BF0167", tenant_id="t-1")
 
@@ -67,8 +68,8 @@ class Reserva:
 
 def esteira(banco, painel=None, reserva=None, **kw):
     ingest = IngestTelemetry(machines=Maquinas(), telemetry=banco)
-    logs = []
-    p = IngestPipeline(ingest, notifier=painel, overflow=reserva, log=logs.append, **kw)
+    logs = Logs()
+    p = IngestPipeline(ingest, notifier=painel, overflow=reserva, log=logs, **kw)
     p.start()
     return p, logs
 
@@ -108,7 +109,15 @@ class TestEsteira(unittest.TestCase):
         self.assertEqual(banco.gravadas[0].received_at, chegada)
         self.assertEqual(banco.gravadas[19].received_at, chegada + timedelta(seconds=19))
         self.assertEqual([e.payload["i"] for e in painel.eventos], list(range(20)))
-        self.assertEqual(sum("[MSG] TITAN BF0167/Dados1 Maquina (tenant=t-1) gravada" in l for l in logs), 20)
+        # as 20 gravacoes viram UMA linha de resumo (fechada no encerramento), e
+        # nenhuma linha por mensagem
+        [(nivel, resumo)] = logs.de("mqtt.resumo")
+        self.assertEqual(nivel, "INFO")
+        self.assertEqual(
+            {k: v for k, v in resumo.items() if k != "janela_s"},
+            {"maquina": "TITAN BF0167", "msgs": 20, "gravadas": 20, "mantidas": 0, "falhas": 0, "topicos": 1},
+        )
+        self.assertEqual(len(logs.eventos), 1, logs.linhas)
 
     def test_hora_e_carimbada_na_chegada_e_nao_na_gravacao(self):
         banco = BancoLento(atraso=0.3)
@@ -138,21 +147,32 @@ class TestEsteira(unittest.TestCase):
         guardadas = sorted(e.payload["i"] for e in banco.gravadas + reserva.escritas)
         self.assertEqual(guardadas, list(range(10)), "nenhuma leitura pode sumir")
         self.assertEqual(p.descartadas, len(reserva.escritas))
-        self.assertTrue(any("[FILA] Fila cheia" in l for l in logs))
+        cheia = logs.de("fila.cheia")
+        self.assertTrue(cheia)
+        nivel, campos = cheia[0]
+        self.assertEqual((nivel, campos["fila"], campos["destino"], campos["total_descartadas"]),
+                         ("WARN", "gravacao", "reserva_jsonl", 1))
 
     def test_topico_invalido_e_maquina_sem_cadastro_nao_param_a_esteira(self):
         banco, painel = BancoLento(), Painel()
         ingest = IngestTelemetry(machines=Maquinas(maquina=None), telemetry=banco)
-        logs = []
-        p = IngestPipeline(ingest, notifier=painel, log=logs.append)
+        logs = Logs()
+        p = IngestPipeline(ingest, notifier=painel, log=logs)
         p.start()
         p.submit("sem-tipo", b"{}", 1, False)
         p.submit("TITAN BF0167/Y", b"{}", 1, False)
         self.assertTrue(p.stop(timeout=5.0))
         self.assertEqual(banco.gravadas, [])
         self.assertEqual(painel.eventos, [])
-        self.assertTrue(any(l.startswith("[SKIP]") for l in logs))
-        self.assertTrue(any("Nao foi possivel resolver" in l for l in logs))
+        self.assertEqual(logs.linhas_de("mqtt.topico_invalido"), ["nivel=WARN evt=mqtt.topico_invalido topico=sem-tipo"])
+        self.assertEqual(
+            logs.linhas_de("mqtt.maquina_nao_resolvida"),
+            ['nivel=ERRO evt=mqtt.maquina_nao_resolvida maquina="TITAN BF0167" topico="TITAN BF0167/Y"'],
+        )
+        [(nivel, descartes)] = logs.de("mqtt.resumo_descartes")
+        self.assertEqual(nivel, "ERRO")
+        self.assertEqual((descartes["topico_invalido"], descartes["maquina_nao_resolvida"]), (1, 1))
+        self.assertEqual(logs.de("mqtt.resumo"), [])  # nenhuma maquina gravou nada
 
     def test_excecao_na_gravacao_nao_mata_a_thread(self):
         class BancoQuebrado(BancoLento):
@@ -167,7 +187,12 @@ class TestEsteira(unittest.TestCase):
         p.submit("TITAN BF0167/Z", b'{"i": 1}', 1, False)
         self.assertTrue(p.stop(timeout=5.0))
         self.assertEqual([e.payload["i"] for e in banco.gravadas], [1])
-        self.assertTrue(any("FALHOU" in l for l in logs))
+        [(nivel, falha)] = logs.de("gravacao.falha_inesperada")
+        self.assertEqual(nivel, "ERRO")
+        self.assertIn('erro="RuntimeError: conexao caiu"', logs.linhas_de("gravacao.falha_inesperada")[0])
+        [(nivel, resumo)] = logs.de("mqtt.resumo")
+        self.assertEqual(nivel, "WARN")  # houve falha na janela
+        self.assertEqual((resumo["msgs"], resumo["gravadas"], resumo["falhas"]), (2, 1, 1))
 
     def test_aviso_quando_a_gravacao_acumula(self):
         liberar = threading.Event()
@@ -182,9 +207,11 @@ class TestEsteira(unittest.TestCase):
             p.submit("TITAN BF0167/W", b"{}", 1, False)
         self.assertTrue(espera(lambda: p.pendentes >= 250))
         liberar.set()
-        self.assertTrue(espera(lambda: any("Gravacao em dia" in l for l in logs)))
+        self.assertTrue(espera(lambda: logs.de("fila.em_dia")))
         self.assertTrue(p.stop(timeout=5.0))
-        self.assertTrue(any("aguardando gravacao" in l for l in logs))
+        [(nivel, atrasada)] = logs.de("fila.atrasada")
+        self.assertEqual(nivel, "WARN")
+        self.assertGreaterEqual(atrasada["pendentes"], 200)
 
 
 class TestExecuteContinuaIgual(unittest.TestCase):

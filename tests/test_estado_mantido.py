@@ -13,6 +13,7 @@ from app.application.ingest_telemetry import IngestTelemetry, PersistOutcome
 from app.domain.entities import Machine, TelemetryEvent
 from app.domain.hold import state_signature
 from app.infrastructure.ingest_pipeline import IngestPipeline
+from tests.captura_log import Logs
 
 MAQUINA = Machine(id="m-1", machine_code="TITAN BF0999", tenant_id="t-1")
 BRT = timezone(timedelta(hours=-3))
@@ -92,7 +93,7 @@ def evento(categoria, quando, **campos):
 def montar(banco=None, relogio=None, posicoes=None):
     banco = banco or Banco()
     relogio = relogio or Relogio(datetime(2026, 11, 20, 17, 0, tzinfo=timezone.utc))
-    held = HeldStates(banco, flush_after=timedelta(seconds=10), log=lambda _m: None, clock=relogio)
+    held = HeldStates(banco, flush_after=timedelta(seconds=10), log=lambda *_a, **_k: None, clock=relogio)
     ingest = IngestTelemetry(machines=Maquinas(), telemetry=banco, held=held, positions=posicoes)
     return ingest, banco, held, relogio
 
@@ -223,8 +224,8 @@ class EstadoMantido(unittest.TestCase):
 
     def test_encerrar_a_esteira_grava_o_estado_aberto(self):
         ingest, banco, _, _ = montar()
-        logs = []
-        pipeline = IngestPipeline(ingest, log=logs.append)
+        logs = Logs()
+        pipeline = IngestPipeline(ingest, log=logs)
         pipeline.start()
         for s in range(5):
             pipeline.submit(
@@ -236,7 +237,9 @@ class EstadoMantido(unittest.TestCase):
         self.assertTrue(pipeline.stop(timeout=10))
         self.assertEqual(len(banco.linhas), 1)
         self.assertEqual(banco.linhas[1]["repeats"], 4)
-        self.assertEqual(sum("mantida" in l for l in logs), 4)
+        # uma gravada e quatro mantidas, contadas no resumo e nao linha a linha
+        [(_, resumo)] = logs.de("mqtt.resumo")
+        self.assertEqual((resumo["msgs"], resumo["gravadas"], resumo["mantidas"], resumo["falhas"]), (5, 1, 4, 0))
 
     def test_sem_estado_mantido_grava_toda_leitura(self):
         banco = Banco()

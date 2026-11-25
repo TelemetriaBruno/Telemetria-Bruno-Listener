@@ -13,6 +13,12 @@ import paho.mqtt.client as mqtt
 
 from app.infrastructure.config import Settings
 from app.infrastructure.ingest_pipeline import IngestPipeline
+from app.infrastructure.logfmt import log
+
+
+def _motivo(reason_code) -> dict:
+    """ReasonCode do paho em dois campos: o numero e o texto ("Not authorized")."""
+    return {"reason_code": getattr(reason_code, "value", reason_code), "motivo": str(reason_code)}
 
 
 class MqttSubscriber:
@@ -40,15 +46,18 @@ class MqttSubscriber:
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code == 0:
-            print(f"[OK] Conectado a {self._settings.mqtt_host}:{self._settings.mqtt_port}")
+            log("INFO", "mqtt.conectado", host=self._settings.mqtt_host, porta=self._settings.mqtt_port)
             for topic in self._settings.mqtt_topics:
                 client.subscribe(topic, qos=self._settings.mqtt_qos)
-                print(f"[SUB] Inscrito em '{topic}' (QoS {self._settings.mqtt_qos})")
+                log("INFO", "mqtt.inscrito", topico=topic, qos=self._settings.mqtt_qos)
         else:
-            print(f"[ERRO] Falha na conexao MQTT. reason_code={reason_code}")
+            # credencial recusada, broker cheio...: o paho tenta de novo sozinho
+            log("ERRO", "mqtt.falha_conexao", host=self._settings.mqtt_host, **_motivo(reason_code))
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
-        print(f"[OFF] Desconectado do MQTT (reason_code={reason_code}). Reconectando...")
+        # 0 = desconexao pedida (encerramento); o resto e queda, e o paho reconecta
+        nivel = "INFO" if reason_code == 0 else "WARN"
+        log(nivel, "mqtt.desconectado", **_motivo(reason_code))
 
     def _on_message(self, client, userdata, msg):
         # So enfileira (com a hora da chegada) e volta: o paho precisa ficar
@@ -60,12 +69,12 @@ class MqttSubscriber:
     def run_forever(self) -> None:
         """Bloqueia ate stop() (ou Ctrl+C) desconectar do broker."""
         s = self._settings
-        print(f"Conectando a {s.mqtt_host}:{s.mqtt_port} ...")
+        log("INFO", "mqtt.conectando", host=s.mqtt_host, porta=s.mqtt_port)
         self._client.connect(s.mqtt_host, s.mqtt_port, keepalive=60)
         try:
             self._client.loop_forever()
         except KeyboardInterrupt:
-            print("\n[FIM] Encerrando por interrupcao do usuario.")
+            log("INFO", "listener.interrompido", motivo="ctrl_c")
             self._client.disconnect()
 
     def stop(self) -> None:

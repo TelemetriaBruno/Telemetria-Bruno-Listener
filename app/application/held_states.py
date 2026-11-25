@@ -16,6 +16,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
 
+from app.application.ports import EventLog, sem_log
 from app.domain.entities import TelemetryEvent
 from app.domain.hold import HeldState, holds_state, hour_of, state_signature
 
@@ -38,11 +39,13 @@ class HeldStates:
         self,
         repo: HoldRepository,
         flush_after: timedelta = FLUSH_AFTER,
-        log: Callable[[str], None] = print,
+        log: EventLog = sem_log,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         self._repo = repo
         self._flush_after = flush_after
+        # log(nivel, evt, **campos); o main.py injeta o de logfmt (limitado: a
+        # falha se repete a cada atualizacao de cada estado aberto)
         self._log = log
         self._clock = clock
         self._abertos: dict[tuple[str, str], HeldState] = {}
@@ -119,7 +122,7 @@ class HeldStates:
         try:
             ok = self._repo.extend_hold(st.row_id, st.held_until, st.repeats)
         except Exception as exc:  # rede, resposta invalida: tenta de novo depois
-            self._log(f"[ESTADO] Falha ao atualizar a linha {st.row_id} (tenta de novo): {exc}")
+            self._log("WARN", "estado.falha_atualizar", linha=st.row_id, erro=exc)
             return False
         if ok:
             st.written_repeats = st.repeats

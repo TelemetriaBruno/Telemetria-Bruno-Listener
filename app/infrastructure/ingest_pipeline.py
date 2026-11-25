@@ -24,6 +24,11 @@ Garantias:
   - A hora da leitura (received_at) e a da chegada, carimbada no submit.
   - Filas limitadas: se a gravacao ficar para tras alem do limite, a leitura
     mais antiga vai para o arquivo .jsonl de reserva (nada some em silencio).
+
+Log: nenhuma linha por mensagem (era o que enchia o disco em 24/11/2026). A
+esteira conta o que passou e escreve um resumo por maquina a cada minuto, avisa
+quando uma maquina fica em silencio e limita a repeticao dos erros (ver
+ingest_resumo.py e logfmt.py).
 """
 
 import queue
@@ -36,6 +41,9 @@ from typing import Any, Callable
 from app.application.ingest_telemetry import IngestStatus, IngestTelemetry, PersistOutcome
 from app.application.ports import TelemetryFallbackWriter
 from app.domain.entities import TelemetryEvent
+from app.domain.topic import parse_topic
+from app.infrastructure import logfmt
+from app.infrastructure.ingest_resumo import JANELA_S, SILENCIO_S, ResumoIngestao
 
 # Ritmo real (12/11/2026): ~1,7 mensagem/s somando as maquinas. 20 mil leituras
 # na fila de gravacao seguram ~3 h de banco fora do ar com folga de memoria.
@@ -68,14 +76,20 @@ class IngestPipeline:
         overflow: TelemetryFallbackWriter | None = None,
         max_chegada: int = MAX_CHEGADA,
         max_gravacao: int = MAX_GRAVACAO,
-        log: Callable[[str], None] = print,
+        log: Callable[..., None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        janela_s: float = JANELA_S,
+        silencio_s: float = SILENCIO_S,
     ):
         self._ingest = ingest
         self._notifier = notifier
         self._overflow = overflow
-        self._log = log
+        # log(nivel, evt, **campos), ver logfmt.py. Os erros que podem se repetir
+        # a cada mensagem passam pelo limitado (uma linha por minuto por tipo).
+        self._log = log or logfmt.log
+        self._log_limitado = logfmt.LogLimitado(self._log, clock=clock)
         self._clock = clock
+        self._resumo = ResumoIngestao(self._log, clock, janela_s=janela_s, silencio_s=silencio_s)
         self._chegada: "queue.Queue[Any]" = queue.Queue(maxsize=max_chegada)
         self._gravacao: "queue.Queue[Any]" = queue.Queue(maxsize=max_gravacao)
         self._threads = [
@@ -109,6 +123,12 @@ class IngestPipeline:
             retain=retain,
             received_at=received_at or datetime.now(timezone.utc),
         )
+        # A deteccao de silencio olha a CHEGADA do broker, aqui: mais adiante a
+        # thread de preparar pode ficar presa no cadastro (banco fora), e a
+        # maquina que esta publicando pareceria calada.
+        parsed = parse_topic(topic)
+        if parsed is not None:
+            self._resumo.chegou(parsed.machine_code, msg.received_at)
         self._enfileirar(self._chegada, msg)
 
     @property
@@ -146,17 +166,16 @@ class IngestPipeline:
                     msg.topic, msg.payload, msg.qos, msg.retain, msg.received_at
                 )
             except Exception as exc:  # nao pode matar a thread: as demais leituras seguem
-                self._log(f"[ERRO] Falha ao preparar {msg.topic}: {exc}")
+                self._resumo.falha_preparar(msg.topic, exc)
                 continue
 
             if result.status is IngestStatus.INVALID_TOPIC:
-                self._log(f"[SKIP] Topico sem nivel de tipo de dado: {msg.topic}")
+                # topico sem o nivel do tipo de dado (ou sem o da maquina)
+                self._resumo.topico_invalido(msg.topic)
                 continue
             if result.status is not IngestStatus.PREPARED or result.event is None:
-                self._log(
-                    f"[ERRO] Nao foi possivel resolver/registrar a maquina "
-                    f"'{result.machine_code}' (repositorio indisponivel?) — topico {msg.topic}"
-                )
+                # cadastro de maquinas indisponivel: a leitura se perde
+                self._resumo.maquina_nao_resolvida(result.machine_code, msg.topic)
                 continue
 
             # Painel primeiro: a maquina aparece viva mesmo com o banco lento.
@@ -164,7 +183,7 @@ class IngestPipeline:
                 try:
                     self._notifier.notify(result.event)
                 except Exception as exc:
-                    self._log(f"[PUSH] Falha ao avisar o painel (ignorado): {exc}")
+                    self._log_limitado("WARN", "painel.aviso_falhou", maquina=result.machine_code, erro=exc)
             self._enfileirar(self._gravacao, (result.machine_code, result.event))
 
     def _gravar(self) -> None:
@@ -177,20 +196,25 @@ class IngestPipeline:
             if item is _FIM:
                 # o estado aberto de cada topico vai inteiro para o banco
                 self._manter(final=True)
+                self._resumo.fechar()
                 return
             if item is not None:
                 code, event = item
                 try:
                     status = self._persistir(event)
                 except Exception as exc:
-                    self._log(f"[REST] Falha inesperada ao gravar {code}/{event.category}: {exc}")
+                    # qualquer parte da gravacao: banco, copia .jsonl (disco cheio), estado
+                    self._log_limitado(
+                        "ERRO", "gravacao.falha_inesperada", maquina=code, categoria=event.category, erro=exc
+                    )
                     status = PersistOutcome.FAILED.value
-                dono = event.tenant_id or "SEM-CLIENTE"
-                self._log(f"[MSG] {code}/{event.category} (tenant={dono}) {status}")
+                # sem linha por mensagem: entra no resumo da janela
+                self._resumo.gravou(code, event.category, status)
                 self._avisar_atraso()
             if self._clock() >= proxima_manutencao:
                 proxima_manutencao = self._clock() + MANUTENCAO_S
                 self._manter(final=False)
+                self._resumo.tick()
 
     def _persistir(self, event: TelemetryEvent) -> str:
         """gravada / mantida / FALHOU. Ingestao sem estado mantido (ou de teste)
@@ -207,7 +231,8 @@ class IngestPipeline:
         try:
             flush(final=final)
         except Exception as exc:
-            self._log(f"[ESTADO] Falha ao atualizar os estados mantidos (ignorado): {exc}")
+            # roda a cada segundo: limitado, senao uma falha fixa seria 60 linhas/min
+            self._log_limitado("WARN", "estado.falha_manutencao", final=final, erro=exc)
 
     # --- apoio -------------------------------------------------------------------
 
@@ -233,16 +258,20 @@ class IngestPipeline:
             self._descartadas += 1
             total = self._descartadas
         event = item[1] if isinstance(item, tuple) else None
+        fila = "gravacao" if isinstance(item, tuple) else "chegada"
+        erro = None
         if isinstance(event, TelemetryEvent) and self._overflow is not None:
             try:
                 self._overflow.write(event)
-                destino = "salva no .jsonl de reserva"
+                destino = "reserva_jsonl"
             except Exception as exc:
-                destino = f"PERDIDA (reserva falhou: {exc})"
+                destino, erro = "perdida", exc
         else:
-            destino = "PERDIDA (fila de chegada cheia)"
+            destino = "perdida"
         if total == 1 or total % 100 == 0:
-            self._log(f"[FILA] Fila cheia: leitura {destino}. Total descartado: {total}")
+            # salva na reserva = degradado (WARN); perdida = ERRO
+            nivel = "WARN" if destino == "reserva_jsonl" else "ERRO"
+            self._log(nivel, "fila.cheia", fila=fila, destino=destino, total_descartadas=total, erro=erro)
 
     def _avisar_atraso(self) -> None:
         pendentes = self._gravacao.qsize()
@@ -251,7 +280,8 @@ class IngestPipeline:
             self._atrasada = True
             if agora - self._ultimo_aviso >= AVISO_INTERVALO_S:
                 self._ultimo_aviso = agora
-                self._log(f"[FILA] {pendentes} leituras aguardando gravacao (banco lento?)")
+                # leituras aguardando gravacao: banco lento?
+                self._log("WARN", "fila.atrasada", pendentes=pendentes)
         elif self._atrasada and pendentes == 0:
             self._atrasada = False
-            self._log("[FILA] Gravacao em dia")
+            self._log("INFO", "fila.em_dia")

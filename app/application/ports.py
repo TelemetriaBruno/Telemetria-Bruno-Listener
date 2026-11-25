@@ -92,3 +92,15 @@ class AlarmRepository(Protocol):
         de antes da coluna existir) que dispararam ate `cleared_at`: e o
         "Maquina sem alarmes". Retorna True se a gravacao foi aceita."""
         ...
+
+
+class EventLog(Protocol):
+    def __call__(self, nivel: str, evt: str, **campos: object) -> None:
+        """Um evento de log: nivel INFO/WARN/ERRO, `evt` no formato area.acao e
+        campos chave=valor (a implementacao e infrastructure/logfmt.py, injetada
+        pelo main.py: a aplicacao nao importa a infraestrutura)."""
+        ...
+
+
+def sem_log(nivel: str, evt: str, **campos: object) -> None:
+    """Log que descarta: padrao de quem nao recebeu um log injetado (testes)."""

@@ -1,6 +1,11 @@
 """
 Adaptadores Supabase (API REST / PostgREST): implementam as portas
 MachineRepository e TelemetryRepository usando HTTP.
+
+Log (logfmt.py): erros com `tabela`, `operacao`, `status` e no maximo 200
+caracteres do corpo da resposta em `resposta=` (nunca o payload da telemetria
+nem a querystring). Os que podem se repetir a cada mensagem passam pelo
+`_log_limitado`: uma linha por minuto por tipo de falha, com `suprimidas=N`.
 """
 
 import time
@@ -8,7 +13,40 @@ import time
 import requests
 
 from app.domain.entities import Machine, TelemetryEvent
+from app.infrastructure import logfmt
 from app.infrastructure.config import Settings
+
+_log = logfmt.log
+_log_limitado = logfmt.LogLimitado()
+
+
+def _resposta(resp: requests.Response) -> str:
+    """O essencial do corpo de erro do PostgREST, em ate 200 caracteres.
+
+    O "Failing row contains (...)" que vem em `details` (violacao de NOT NULL,
+    CHECK) repete a linha inteira, payload incluido: fica de fora."""
+    try:
+        corpo = resp.json()
+    except Exception:  # corpo que nao e JSON (HTML do proxy, texto): usa o texto
+        corpo = None
+    if isinstance(corpo, dict) and ("message" in corpo or "code" in corpo):
+        partes = [
+            str(corpo[k])
+            for k in ("code", "message", "details", "hint")
+            if corpo.get(k) and not str(corpo[k]).startswith("Failing row contains")
+        ]
+        texto = " | ".join(partes)
+    else:
+        texto = resp.text or ""
+        corte = texto.find("Failing row contains")
+        if corte >= 0:
+            texto = texto[:corte] + "Failing row contains (omitida)"
+    return texto[:200]
+
+
+def _nivel_http(status: int) -> str:
+    """4xx nao tem nova tentativa (a leitura se perde): ERRO. 5xx tenta de novo: WARN."""
+    return "ERRO" if 400 <= status < 500 else "WARN"
 
 
 def build_http_session(settings: Settings) -> requests.Session:
@@ -33,7 +71,8 @@ class SupabaseMachineRepository:
 
     def find_by_code(self, machine_code: str) -> Machine | None:
         if not self._configured:
-            print("[REST] POSTGREST_URL/POSTGREST_KEY ou SUPABASE_URL/SUPABASE_KEY nao configurados no .env")
+            # POSTGREST_URL/POSTGREST_KEY ou SUPABASE_URL/SUPABASE_KEY vazios no .env
+            _log_limitado("ERRO", "banco.sem_configuracao", tabela="machines")
             return None
 
         try:
@@ -47,13 +86,18 @@ class SupabaseMachineRepository:
                 timeout=self._timeout,
             )
             if resp.status_code != 200:
-                print(
-                    f"[REST] Falha ao consultar machines: HTTP {resp.status_code} {resp.text[:200]}"
+                # WARN: maquina ja conhecida segue com o cadastro em cache; a leitura
+                # perdida (maquina nova) sai como ERRO em mqtt.maquina_nao_resolvida
+                _log_limitado(
+                    "WARN", "banco.consulta_falhou", tabela="machines", maquina=machine_code,
+                    status=resp.status_code, resposta=_resposta(resp),
                 )
                 return None
             rows = resp.json()
         except requests.RequestException as exc:
-            print(f"[REST] Erro de rede consultando machines: {exc}")
+            _log_limitado(
+                "WARN", "banco.erro_rede", tabela="machines", operacao="consulta", maquina=machine_code, erro=exc
+            )
             return None
 
         if not rows:
@@ -89,21 +133,25 @@ class SupabaseMachineRepository:
                 timeout=self._timeout,
             )
             if resp.status_code not in (200, 201):
-                print(
-                    f"[REST] Falha ao auto-registrar maquina: HTTP {resp.status_code} {resp.text[:200]}"
+                _log_limitado(
+                    "WARN", "banco.insert_falhou", tabela="machines", maquina=machine_code,
+                    status=resp.status_code, resposta=_resposta(resp), tentativa=1,
                 )
                 # Pode ter sido criada em paralelo; tenta ler de novo.
                 return self.find_by_code(machine_code)
             rows = resp.json()
         except requests.RequestException as exc:
-            print(f"[REST] Erro de rede auto-registrando maquina: {exc}")
+            _log_limitado(
+                "WARN", "banco.insert_falhou", tabela="machines", maquina=machine_code, erro=exc, tentativa=1
+            )
             return None
 
         if not rows:
             return self.find_by_code(machine_code)
 
         row = rows[0]
-        print(f"[NOVA] Maquina auto-registrada (pendente): {machine_code!r}")
+        # auto-registrada como pendente (sem cliente)
+        _log("INFO", "maquina.registrada", maquina=machine_code)
         return Machine(id=row["id"], machine_code=machine_code, tenant_id=row.get("tenant_id"))
 
 
@@ -149,13 +197,17 @@ class SupabaseTelemetryRepository:
                         return int(rows[0]["id"]) if rows else 0
                     except (ValueError, KeyError, IndexError, TypeError):
                         return 0
-                print(f"[REST] insert telemetry HTTP {resp.status_code}: {resp.text[:300]}")
+                _log_limitado(
+                    _nivel_http(resp.status_code), "banco.insert_falhou", tabela="telemetry",
+                    status=resp.status_code, resposta=_resposta(resp), tentativa=attempt,
+                )
                 if 400 <= resp.status_code < 500:
                     return None
             except requests.RequestException as exc:
-                print(f"[REST] Erro de rede no insert (tentativa {attempt}): {exc}")
+                _log_limitado("WARN", "banco.insert_falhou", tabela="telemetry", erro=exc, tentativa=attempt)
             time.sleep(1.5 * attempt)
-        print("[REST] Telemetria NAO gravada apos retries.")
+        # a leitura nao foi gravada (conta como falha no mqtt.resumo)
+        _log_limitado("ERRO", "banco.insert_desistiu", tabela="telemetry", tentativas=3)
         return None
 
     def supports_hold(self) -> bool:
@@ -169,10 +221,11 @@ class SupabaseTelemetryRepository:
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
-            print(f"[ESTADO] Nao deu para conferir as colunas do estado mantido: {exc}")
+            _log("WARN", "estado.verificacao_falhou", etapa="colunas", erro=exc)
             return False
         if resp.status_code != 200:
-            print(f"[ESTADO] Banco sem as colunas do estado mantido (HTTP {resp.status_code}): {resp.text[:200]}")
+            # banco sem held_until/repeats (migration 0026)
+            _log("WARN", "estado.sem_colunas", status=resp.status_code, resposta=_resposta(resp))
             return False
         # A permissao de ATUALIZAR tambem: sem ela a linha do estado nunca
         # ganharia o "mantido ate", e o historico mostraria buracos. Atualiza uma
@@ -186,11 +239,12 @@ class SupabaseTelemetryRepository:
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
-            print(f"[ESTADO] Nao deu para conferir a permissao de atualizar a telemetria: {exc}")
+            _log("WARN", "estado.verificacao_falhou", etapa="permissao", erro=exc)
             return False
         if resp.status_code in (200, 204):
             return True
-        print(f"[ESTADO] Sem permissao para atualizar held_until/repeats (HTTP {resp.status_code}): {resp.text[:200]}")
+        # sem permissao de atualizar held_until/repeats
+        _log("WARN", "estado.sem_permissao", status=resp.status_code, resposta=_resposta(resp))
         return False
 
     def extend_hold(self, row_id: int, held_until, repeats: int) -> bool:
@@ -205,11 +259,16 @@ class SupabaseTelemetryRepository:
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
-            print(f"[ESTADO] Erro de rede ao estender a linha {row_id}: {exc}")
+            _log_limitado(
+                "WARN", "banco.erro_rede", tabela="telemetry", operacao="estender_estado", linha=row_id, erro=exc
+            )
             return False
         if resp.status_code in (200, 204):
             return True
-        print(f"[ESTADO] Atualizar a linha {row_id}: HTTP {resp.status_code}: {resp.text[:200]}")
+        _log_limitado(
+            "WARN", "banco.update_falhou", tabela="telemetry", operacao="estender_estado", linha=row_id,
+            status=resp.status_code, resposta=_resposta(resp),
+        )
         return False
 
 
@@ -257,12 +316,17 @@ class SupabaseAlarmRepository:
                 # maquina + topico + alarme + hora): reentrega, ja esta na tabela
                 if resp.status_code == 409:
                     return True
-                print(f"[REST] insert alarm HTTP {resp.status_code}: {resp.text[:200]}")
+                _log_limitado(
+                    _nivel_http(resp.status_code), "banco.insert_falhou", tabela="alarms",
+                    status=resp.status_code, resposta=_resposta(resp), tentativa=attempt,
+                )
                 if 400 <= resp.status_code < 500:
                     return False
             except requests.RequestException as exc:
-                print(f"[REST] Erro de rede no insert de alarme (tentativa {attempt}): {exc}")
+                _log_limitado("WARN", "banco.insert_falhou", tabela="alarms", erro=exc, tentativa=attempt)
             time.sleep(1.0 * attempt)
+        # o disparo ficou so na telemetry
+        _log_limitado("ERRO", "banco.insert_desistiu", tabela="alarms", tentativas=2)
         return False
 
     def fired_since(self, machine_id: str, category: str, code, description, since) -> bool:
@@ -286,9 +350,14 @@ class SupabaseAlarmRepository:
             resp = self._http.get(f"{self._rest_base}/alarms", params=params, timeout=self._timeout)
             if resp.status_code == 200:
                 return len(resp.json()) > 0
-            print(f"[REST] consulta de alarme recente HTTP {resp.status_code}: {resp.text[:200]}")
+            _log_limitado(
+                "WARN", "banco.consulta_falhou", tabela="alarms", operacao="alarme_recente",
+                status=resp.status_code, resposta=_resposta(resp),
+            )
         except (requests.RequestException, ValueError) as exc:
-            print(f"[REST] Erro ao consultar alarme recente (grava assim mesmo): {exc}")
+            # sem a resposta, o alarme e gravado assim mesmo
+            evt = "banco.erro_rede" if isinstance(exc, requests.RequestException) else "banco.consulta_falhou"
+            _log_limitado("WARN", evt, tabela="alarms", operacao="alarme_recente", erro=exc)
         return False
 
     def clear(self, machine_id: str, category: str, cleared_at) -> bool:
@@ -314,11 +383,16 @@ class SupabaseAlarmRepository:
                 )
                 if resp.status_code in (200, 204):
                     return True
-                print(f"[REST] resolve alarm HTTP {resp.status_code}: {resp.text[:200]}")
+                _log_limitado(
+                    _nivel_http(resp.status_code), "banco.update_falhou", tabela="alarms", operacao="resolver",
+                    status=resp.status_code, resposta=_resposta(resp), tentativa=attempt,
+                )
                 if 400 <= resp.status_code < 500:
                     return False
             except requests.RequestException as exc:
-                print(f"[REST] Erro de rede ao resolver alarmes (tentativa {attempt}): {exc}")
+                _log_limitado(
+                    "WARN", "banco.erro_rede", tabela="alarms", operacao="resolver", erro=exc, tentativa=attempt
+                )
             time.sleep(1.0 * attempt)
         return False
 
@@ -361,11 +435,14 @@ class SupabaseMachinePositionRepository:
                 timeout=self._timeout,
             )
             if resp.status_code != 200:
-                print(f"[REST] Falha ao ler metadata da maquina: HTTP {resp.status_code}")
+                _log_limitado(
+                    "WARN", "banco.consulta_falhou", tabela="machines", operacao="ler_metadata",
+                    status=resp.status_code, resposta=_resposta(resp),
+                )
                 return False
             rows = resp.json()
         except requests.RequestException as exc:
-            print(f"[REST] Erro de rede lendo metadata: {exc}")
+            _log_limitado("WARN", "banco.erro_rede", tabela="machines", operacao="ler_metadata", erro=exc)
             return False
 
         metadata = (rows[0].get("metadata") if rows else None) or {}
@@ -387,7 +464,10 @@ class SupabaseMachinePositionRepository:
             )
             if resp.status_code in (200, 204):
                 return True
-            print(f"[REST] update posicao HTTP {resp.status_code}: {resp.text[:200]}")
+            _log_limitado(
+                "WARN", "banco.update_falhou", tabela="machines", operacao="posicao",
+                status=resp.status_code, resposta=_resposta(resp),
+            )
         except requests.RequestException as exc:
-            print(f"[REST] Erro de rede gravando posicao: {exc}")
+            _log_limitado("WARN", "banco.erro_rede", tabela="machines", operacao="posicao", erro=exc)
         return False

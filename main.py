@@ -18,6 +18,7 @@ from app.infrastructure.config import Settings
 from app.infrastructure.health_server import start_health_server
 from app.infrastructure.ingest_pipeline import IngestPipeline
 from app.infrastructure.json_file_writer import JsonFileWriter
+from app.infrastructure.logfmt import LogLimitado, log, url_segura
 from app.infrastructure.machine_cache import CachedMachineRepository
 from app.infrastructure.mqtt_subscriber import MqttSubscriber
 from app.infrastructure.null_telemetry import NullTelemetryRepository
@@ -33,16 +34,22 @@ from app.infrastructure.supabase import (
 
 def main() -> None:
     settings = Settings.from_env()
+    # Log (app/infrastructure/logfmt.py): uma linha logfmt por evento, sem linha
+    # por mensagem. O limitado e para a aplicacao, cujas falhas (alarme, posicao,
+    # estado mantido) podem se repetir a cada leitura.
+    log_limitado = LogLimitado(log)
 
     # Hosts como o Render matam o processo se nada escutar em $PORT. Sem a
     # variavel (uso local), nenhuma porta e aberta.
     if settings.http_port:
         start_health_server(settings.http_port)
 
+    file_mode = settings.telemetry_sink == "file"
     if not settings.mqtt_username or not settings.mqtt_password:
-        print("[AVISO] MQTT_USERNAME/MQTT_PASSWORD nao definidos no .env.")
-    if not settings.rest_url or not settings.rest_key:
-        print("[AVISO] banco sem endereco: defina POSTGREST_URL/POSTGREST_KEY ou SUPABASE_URL/SUPABASE_KEY no .env.")
+        log("WARN", "config.mqtt_sem_credenciais")  # MQTT_USERNAME/MQTT_PASSWORD vazios
+    if not file_mode and (not settings.rest_url or not settings.rest_key):
+        # defina POSTGREST_URL/POSTGREST_KEY ou SUPABASE_URL/SUPABASE_KEY no .env
+        log("ERRO", "config.banco_sem_endereco")
 
     http = build_http_session(settings)
 
@@ -53,24 +60,25 @@ def main() -> None:
         ttl_seconds=settings.machine_cache_ttl,
     )
 
-    file_mode = settings.telemetry_sink == "file"
+    # Como o Listener subiu, numa linha so (listener.iniciado, logo antes de
+    # conectar ao broker).
+    inicio: dict = {}
     if file_mode:
         # Modo so-arquivo: telemetria vai para .jsonl locais; banco nao e tocado.
         telemetry = NullTelemetryRepository()
         fallback = JsonFileWriter(settings.output_dir)
-        print(f"[MODO] Telemetria salva APENAS em arquivos .jsonl em '{settings.output_dir}/'")
+        inicio.update(modo="arquivo", dir=settings.output_dir)
     else:
         telemetry = SupabaseTelemetryRepository(settings, http)
         fallback = JsonFileWriter(settings.output_dir) if settings.save_json_files else None
-        onoff = "com" if fallback else "sem"
         # o destino real e o rest_url: POSTGREST_URL (RDS) quando definido, senao
-        # o Supabase. So a URL vai para o log; a chave fica de fora.
-        destino = (
-            f"PostgREST proprio (RDS) em {settings.postgrest_url}"
-            if settings.postgrest_url
-            else f"Supabase em {settings.supabase_url or '(SUPABASE_URL vazio)'}"
+        # o Supabase. So a URL (sem query nem credencial) vai para o log.
+        inicio.update(
+            modo="banco",
+            destino="rds" if settings.postgrest_url else "supabase",
+            banco_url=url_segura(settings.postgrest_url or settings.supabase_url),
+            copia_jsonl=fallback is not None,
         )
-        print(f"[MODO] Telemetria no banco via {destino} ({onoff} copia local .jsonl)")
 
     # Alarmes vao para a tabela dedicada `alarms` (so no modo banco).
     alarms = None if file_mode else SupabaseAlarmRepository(settings, http)
@@ -85,12 +93,16 @@ def main() -> None:
     held = None
     if not file_mode and settings.hold_repeated:
         if telemetry.supports_hold():
-            held = HeldStates(telemetry, flush_after=timedelta(seconds=settings.hold_flush_s))
-            print(f"[ESTADO] Leitura repetida nao vira linha nova (mantido ate atualizado a cada {settings.hold_flush_s:g} s)")
+            held = HeldStates(telemetry, flush_after=timedelta(seconds=settings.hold_flush_s), log=log_limitado)
         else:
-            print("[ESTADO] Gravando toda leitura: o banco ainda nao tem held_until/repeats (migration 0026)")
+            # o motivo exato veio na linha estado.* anterior
+            log("WARN", "estado.desligado", motivo="banco_sem_0026")
     elif not file_mode:
-        print("[ESTADO] HOLD_REPEATED=false: gravando toda leitura")
+        log("INFO", "estado.desligado", motivo="hold_repeated_false")
+    if not file_mode:
+        inicio["estado_mantido"] = held is not None
+        if held is not None:
+            inicio["estado_flush_s"] = settings.hold_flush_s
 
     ingest = IngestTelemetry(
         machines=machines,
@@ -99,28 +111,27 @@ def main() -> None:
         alarms=alarms,
         positions=positions,
         held=held,
+        log=log_limitado,
     )
 
     notifier = None
+    inicio["push"] = bool(settings.stream_notify_url)
     if settings.stream_notify_url:
         notifier = StreamNotifier(
             settings.stream_notify_url, secret=settings.stream_notify_secret
         )
-        print(f"[PUSH] Empurrando telemetria ao painel via {settings.stream_notify_url}/api/internal/notify")
+        # empurra cada leitura ao painel em <push_url>/api/internal/notify
+        inicio["push_url"] = url_segura(settings.stream_notify_url)
         if not settings.stream_notify_secret:
-            print(
-                "[PUSH] AVISO: STREAM_NOTIFY_SECRET vazio. O backend vai recusar o "
-                "push (401/503) e o painel ficara so com o poll HTTP."
-            )
+            # o backend vai recusar o push (401/503) e o painel fica so com o poll HTTP
+            log("WARN", "push.sem_segredo")
         elif settings.stream_notify_url.startswith("http://") and not (
             "127.0.0.1" in settings.stream_notify_url
             or "localhost" in settings.stream_notify_url
         ):
-            # o segredo autentica, nao cifra: sobre http remoto ele viaja em claro
-            print(
-                "[PUSH] AVISO: STREAM_NOTIFY_URL remoto sem TLS. O segredo vai em "
-                "claro na rede; use https:// para o backend remoto."
-            )
+            # o segredo autentica, nao cifra: sobre http remoto ele viaja em
+            # claro; use https:// para o backend remoto
+            log("WARN", "push.sem_tls", push_url=inicio["push_url"])
 
     # Reserva para quando a fila de gravacao estourar (banco fora por horas).
     overflow = JsonFileWriter(settings.output_dir)
@@ -130,14 +141,23 @@ def main() -> None:
 
     # systemd para o servico com SIGTERM: desconecta do broker e grava o que
     # ainda esta na fila antes de sair, em vez de perder as leituras pendentes.
-    signal.signal(signal.SIGTERM, lambda signum, frame: subscriber.stop())
+    # Nada de log dentro do tratador de sinal: so marca o motivo.
+    parada = {"motivo": None}
 
+    def ao_sigterm(signum, frame):
+        parada["motivo"] = "sigterm"
+        subscriber.stop()
+
+    signal.signal(signal.SIGTERM, ao_sigterm)
+
+    log("INFO", "listener.iniciado", **inicio)
     subscriber.run_forever()
     pendentes = pipeline.pendentes
     em_dia = pipeline.stop(timeout=20.0)
-    print(
-        f"[FIM] Listener encerrado. Fila ao parar: {pendentes} leitura(s); "
-        + ("todas gravadas." if em_dia else "nem todas couberam no prazo.")
+    # fora do prazo, o que sobrou na fila nao foi gravado
+    log(
+        "INFO" if em_dia else "ERRO", "listener.encerrado",
+        motivo=parada["motivo"], pendentes_ao_parar=pendentes, todas_gravadas=em_dia,
     )
 
 
